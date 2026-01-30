@@ -1,11 +1,14 @@
 """
-數據獲取工具模組
+數據獲取工具模組（多數據源版）
 支援回測：end_date / as_of_date 時取該日為止的歷史數據。
+
+整合多數據源：Yahoo → Stooq → FMP → Twelve Data → ...
 """
 import yfinance as yf
 import pandas as pd
 import requests
 import time
+from datetime import date, datetime, timedelta
 from typing import Optional, Dict, Any
 from config import (
     FMP_API_KEY,
@@ -13,6 +16,15 @@ from config import (
     ALLOWED_EXCHANGES,
     STAGE2_CONFIG
 )
+
+# 多數據源統一介面
+try:
+    from utils.data_sources import get_daily_bars, get_close_on_date, get_close_verified
+except ImportError:
+    # 避免循環 import
+    get_daily_bars = None
+    get_close_on_date = None
+    get_close_verified = None
 
 
 class DataFetcher:
@@ -24,17 +36,53 @@ class DataFetcher:
     
     def get_yahoo_history(self, ticker: str, period: str = "30d", end_date: str = None, start_date: str = None) -> Optional[pd.DataFrame]:
         """
-        獲取 Yahoo Finance 歷史數據。
+        獲取歷史數據（多數據源版）。
         end_date 有值時為回測：取截至該日（含）的數據。
         start_date 有值時限制起始（回測 range 之前看不到）。
+        
+        優先使用多數據源統一介面，若無則回退到 yfinance。
         """
         try:
+            # 嘗試使用多數據源
+            if get_daily_bars is not None and end_date:
+                # 解析日期
+                if isinstance(end_date, str):
+                    end_d = datetime.strptime(end_date, "%Y-%m-%d").date()
+                else:
+                    end_d = end_date
+                
+                if start_date:
+                    if isinstance(start_date, str):
+                        start_d = datetime.strptime(start_date, "%Y-%m-%d").date()
+                    else:
+                        start_d = start_date
+                else:
+                    # 根據 period 計算 start
+                    days_map = {"5d": 5, "1mo": 30, "30d": 30, "3mo": 90, "6mo": 180, "1y": 365}
+                    days = days_map.get(period, 30)
+                    start_d = end_d - timedelta(days=days)
+                
+                df = get_daily_bars(ticker, start_d, end_d)
+                if df is not None and not df.empty:
+                    # 轉換為 yfinance 格式
+                    df = df.set_index('Date')
+                    df.index = pd.to_datetime(df.index)
+                    return df
+            
+            # 回退到 yfinance
             stock = yf.Ticker(ticker)
             if end_date:
-                if start_date:
-                    hist = stock.history(start=start_date, end=end_date)
+                # yfinance end 是 exclusive，要加一天
+                if isinstance(end_date, str):
+                    end_d = datetime.strptime(end_date, "%Y-%m-%d").date()
                 else:
-                    hist = stock.history(period=period, end=end_date)
+                    end_d = end_date
+                end_inclusive = (end_d + timedelta(days=1)).isoformat()
+                
+                if start_date:
+                    hist = stock.history(start=start_date, end=end_inclusive)
+                else:
+                    hist = stock.history(period=period, end=end_inclusive)
             else:
                 hist = stock.history(period=period)
             
@@ -66,18 +114,49 @@ class DataFetcher:
 
     def get_yahoo_financials_as_of(self, ticker: str, as_of_date: str, backtest_start: str = None) -> Optional[Dict[str, Any]]:
         """
-        回測用：取截至 as_of_date 的財報與股價。
+        回測用：取截至 as_of_date 的財報與股價（多數據源版）。
         backtest_start 有值時限制數據起始（range 之前看不到）。
+        
+        股價使用多數據源統一介面；財報仍使用 yfinance。
         """
         try:
+            # 解析日期
+            as_of_d = pd.Timestamp(as_of_date).date()
+            
+            # 優先使用多數據源取得股價
+            price = None
+            if get_close_on_date is not None:
+                price = get_close_on_date(ticker, as_of_d)
+            
+            # 若多數據源無法取得，回退到 yfinance
+            if price is None:
+                end_ts = pd.Timestamp(as_of_date) + pd.Timedelta(days=1)
+                end_str = end_ts.strftime("%Y-%m-%d")
+                stock = yf.Ticker(ticker)
+                if backtest_start:
+                    hist = stock.history(start=backtest_start, end=end_str)
+                else:
+                    hist = stock.history(period="5d", end=end_str)
+                # 若 start/end 無資料，改 period+end 再篩到 as_of_date
+                if hist is None or hist.empty:
+                    hist = stock.history(period="1mo", end=end_str)
+                    if hist is not None and not hist.empty:
+                        try:
+                            ad = pd.Timestamp(as_of_date).date()
+                            mask = hist.index.normalize().date <= ad if hasattr(hist.index, 'normalize') else (hist.index.date <= ad)
+                            hist = hist.loc[mask]
+                            if backtest_start:
+                                bd = pd.Timestamp(backtest_start).date()
+                                mask2 = hist.index.normalize().date >= bd if hasattr(hist.index, 'normalize') else (hist.index.date >= bd)
+                                hist = hist.loc[mask2]
+                        except Exception:
+                            pass
+                if hist is None or hist.empty:
+                    return None
+                price = float(hist["Close"].iloc[-1])
+            
+            # 取得財報資料（仍使用 yfinance）
             stock = yf.Ticker(ticker)
-            if backtest_start:
-                hist = stock.history(start=backtest_start, end=as_of_date)
-            else:
-                hist = stock.history(period="5d", end=as_of_date)
-            if hist is None or hist.empty:
-                return None
-            price = float(hist["Close"].iloc[-1])
 
             inc = getattr(stock, "quarterly_income_stmt", None)
             bal = getattr(stock, "quarterly_balance_sheet", None)

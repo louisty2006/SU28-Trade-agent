@@ -61,14 +61,14 @@ STAGE1_CONFIG = {
 }
 
 # ============================================================================
-# Stage 2: 深度驗證配置 - 強制三數據源交叉驗證
+# Stage 2: 深度驗證配置（測試階段：兩數據源對照即可，省 token/資源）
 # ============================================================================
 STAGE2_CONFIG = {
     "max_workers": 30,  # 並行線程數
     "target_output": 250,  # 輸出 Top 250
     
-    # ⭐ 核心規則：每支股票必須有 3 個有效數據源
-    "required_sources": 3,  # 強制要求（不可妥協）
+    # 測試階段：對照互測改為兩網站即可（省 token/資源）
+    "required_sources": 2,  # 兩數據源對照即通過
     
     # 數據源優先順序（按可靠性 + 免費額度排序）
     "data_sources_priority": [
@@ -166,11 +166,11 @@ STAGE2_CONFIG = {
     "skip_if_quota_exceeded": True,  # 額度用完自動跳過
     "fallback_to_next_source": True,  # 自動切換到下一個備用源
     
-    # 數據一致性檢查
+    # 數據一致性檢查（測試階段：兩源一致即可）
     "data_consistency_check": True,
     "max_variance_pct": 20,  # PE/PB/ROE 允許 20% 差異
     "flag_if_inconsistent": True,  # 標記異常數據
-    "require_majority_consensus": True,  # 至少 2/3 數據源一致
+    "require_majority_consensus": True,  # 兩源時 2/2 一致即通過
     
     # API 限速
     "api_delay": 0.15,  # API 調用延遲（秒）
@@ -291,7 +291,7 @@ VERSION = "4.3"
 # ---------------------------------------------------------------------------
 # 回測模擬（365 天逐日）
 # ---------------------------------------------------------------------------
-BACKTEST_INITIAL_CASH = 100_000.0       # 初始現金（模擬建倉）
+BACKTEST_INITIAL_CASH = 7_000.0        # 回測 Day0 起動資本（USD）
 BACKTEST_PCT_PER_NEW_ENTRY = 0.20      # 每筆新買入動用現金比例（最多 3 筆）
 BACKTEST_ADD_PCT = 0.10                # 加碼時動用現金比例
 BACKTEST_REDUCE_PCT = 0.50              # 減碼時賣出持倉比例

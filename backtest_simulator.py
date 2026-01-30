@@ -1,10 +1,11 @@
 """
-回測模擬器：365 天逐日回測
+回測模擬器：365 天逐日回測（多數據源版）
 
 - 每日僅使用「當日及之前」的數據，無偷看未來。
 - 依 AI 當日決策（持有/加碼/減碼/出場、新買入）以當日收盤價模擬執行。
 - 追蹤持倉與組合價值，產出報酬與摘要。
 - 使用 NYSE 日曆排除美國市場假日。
+- 使用多數據源（Yahoo → Stooq → FMP → ...）取得股價。
 """
 
 import os
@@ -20,6 +21,12 @@ from config import (
     BACKTEST_ADD_PCT,
     BACKTEST_REDUCE_PCT,
 )
+
+# 多數據源統一介面
+try:
+    from utils.data_sources import get_close_on_date
+except ImportError:
+    get_close_on_date = None
 
 # 懶加載 NYSE 日曆（避免頂層 import 拖慢非回測路徑）；若未安裝則僅排除週末
 _nyse_cal = None
@@ -41,21 +48,52 @@ def _get_nyse_calendar():
     return _nyse_cal
 
 
+def _us_holiday(d: date) -> bool:
+    """簡易美國市場假日（無 pandas_market_calendars 時用）。"""
+    m, day = d.month, d.day
+    if m == 1 and day == 1:
+        return True  # New Year
+    if m == 7 and day == 4:
+        return True  # Independence
+    if m == 12 and day == 25:
+        return True  # Christmas
+    # Thanksgiving: 4th Thu Nov
+    if m == 11 and d.weekday() == 3:
+        if 22 <= day <= 28:
+            return True
+    # Juneteenth (from 2021)
+    if m == 6 and day == 19:
+        return True
+    # MLK 3rd Mon Jan
+    if m == 1 and d.weekday() == 0 and 15 <= day <= 21:
+        return True
+    # Presidents 3rd Mon Feb
+    if m == 2 and d.weekday() == 0 and 15 <= day <= 21:
+        return True
+    # Memorial last Mon May
+    if m == 5 and d.weekday() == 0 and day >= 25:
+        return True
+    # Labor 1st Mon Sep
+    if m == 9 and d.weekday() == 0 and day <= 7:
+        return True
+    return False
+
+
 def _weekday_only_trading_days(start: date, end: date) -> List[date]:
-    """僅排除週末的交易日列表（無假日）。"""
+    """僅排除週末＋主要美國假日的交易日列表（無日曆套件時用）。"""
     days = []
     d = start
     while d <= end:
-        if d.weekday() < 5:
+        if d.weekday() < 5 and not _us_holiday(d):
             days.append(d)
         d += timedelta(days=1)
     return days
 
 
 def _weekday_only_prev(d: date) -> date:
-    """僅排除週末的前一「交易日」。"""
+    """僅排除週末＋主要美國假日的上一交易日。"""
     out = d - timedelta(days=1)
-    while out.weekday() >= 5:
+    while out.weekday() >= 5 or _us_holiday(out):
         out -= timedelta(days=1)
     return out
 

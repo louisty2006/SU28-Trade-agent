@@ -1,18 +1,24 @@
 """
-Stage 1: 快速掃描全市場（強化限流保護）
+Stage 1: 快速掃描全市場（多數據源版）
+
+數據源：多數據源（Yahoo → Stooq → FMP → ...）
+- 依序嘗試多個源，直到拿到該日數據
+- 真實數據，不用 fallback 替換
 """
 
 import pandas as pd
 import numpy as np
-import yfinance as yf
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, date, timedelta
 import time
 import os
 import random
 import warnings
 warnings.filterwarnings('ignore')
 from config import REIKAN_STAGE1_CSV
+
+# 多數據源統一介面
+from utils.data_sources import get_daily_bars, get_close_on_date
 
 class Stage1Scanner:
     def __init__(self, stock_file='COMPLETE_ALL_STOCKS_FINAL.csv', output_dir='reports/stage1'):
@@ -37,18 +43,56 @@ class Stage1Scanner:
         return ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'META', 'NVDA', 'AMD']
     
     def calculate_score(self, symbol, retry=0, as_of_date=None, backtest_start=None):
+        """
+        計算股票評分（使用多數據源）
+        
+        Args:
+            symbol: 股票代碼
+            retry: 重試次數
+            as_of_date: 回測時數據截至該日（date 物件）
+            backtest_start: 回測時數據起始日（date 物件）
+        """
         try:
             time.sleep(random.uniform(0.1, 0.3))
             
-            stock = yf.Ticker(symbol)
+            # 決定日期範圍
             if as_of_date:
-                if backtest_start:
-                    hist = stock.history(start=backtest_start, end=as_of_date)
+                # 確保是 date 物件
+                if isinstance(as_of_date, str):
+                    end_date = datetime.strptime(as_of_date, "%Y-%m-%d").date()
+                elif hasattr(as_of_date, 'date'):
+                    end_date = as_of_date.date()
                 else:
-                    hist = stock.history(period='3mo', end=as_of_date)
+                    end_date = as_of_date
+                
+                if backtest_start:
+                    if isinstance(backtest_start, str):
+                        start_date = datetime.strptime(backtest_start, "%Y-%m-%d").date()
+                    elif hasattr(backtest_start, 'date'):
+                        start_date = backtest_start.date()
+                    else:
+                        start_date = backtest_start
+                    # 回測時仍需至少 90 日歷史才能算 SMA20，否則 len(df)<20 全被篩掉
+                    min_start = end_date - timedelta(days=90)
+                    if start_date > min_start:
+                        start_date = min_start
+                else:
+                    # 預設取 3 個月的資料
+                    start_date = end_date - timedelta(days=90)
             else:
-                hist = stock.history(period='3mo')
+                # 即時模式
+                end_date = date.today()
+                start_date = end_date - timedelta(days=90)
             
+            # 使用多數據源統一介面取得日線
+            df = get_daily_bars(symbol, start_date, end_date)
+            if df is None or df.empty or len(df) < 20:
+                return None
+            
+            # 轉換為標準格式（模擬 yfinance 的 hist）
+            hist = df.copy()
+            hist = hist.set_index('Date')
+
             if hist.empty or len(hist) < 20:
                 return None
             

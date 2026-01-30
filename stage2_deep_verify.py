@@ -1,14 +1,14 @@
 """
-Stage 2: 深度驗證
+Stage 2: 深度驗證（多數據源版）
 從 Stage 1 的 Top 1000 驗證篩選出 Top 250
 
-數據源：Yahoo Finance + FMP (免費版)
+數據源：多數據源（Yahoo → Stooq → FMP → Twelve Data → ...）
 並行：30 線程（考慮 API 限制）
 預計時間：10-15 分鐘
 """
 import pandas as pd
 import os
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 import time
@@ -16,6 +16,9 @@ import time
 from config import STAGE2_CONFIG, STAGE2_DIR, REIKAN_STAGE1_CSV, REIKAN_STAGE2_CSV, REIKAN_STAGE2_HTML
 from utils.data_fetcher import data_fetcher
 from utils.scoring import calculate_stage2_score, get_score_explanation
+
+# 多數據源統一介面
+from utils.data_sources import get_daily_bars, get_close_on_date, get_close_verified, get_call_stats
 
 
 class Stage2Verifier:

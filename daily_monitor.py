@@ -1,8 +1,8 @@
 """
-每日持倉監控與今日決策報告（第一性原理版）
+每日持倉監控與今日決策報告（多數據源版）
 
 - 讀取 data/positions.csv 持倉表
-- 取得當前市價（Yahoo Finance）
+- 取得當前市價（多數據源：Yahoo → Stooq → FMP → ...）
 - 以「市場＋持倉」做一次綜合決策（單一 LLM）：今日最好決定
 - 產出今日決策報告：文字 + JSON，存於 reports/daily/YYYY-MM-DD/
 
@@ -17,9 +17,11 @@ import requests
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Optional
 
-import yfinance as yf
 from dotenv import load_dotenv
 from config import REIKAN_DAILY_TXT, REIKAN_DAILY_JSON
+
+# 多數據源統一介面
+from utils.data_sources import get_close_on_date, get_close_verified
 
 # 載入 .env（與 stage3 一致，支援主專案目錄）
 load_dotenv()
@@ -73,29 +75,33 @@ def load_positions(path: str = POSITIONS_CSV) -> List[Dict]:
 
 def get_current_price(ticker: str, as_of_date=None, backtest_start=None) -> Optional[float]:
     """
-    用 Yahoo Finance 取當前價（最近收盤）。
-    as_of_date 有值時為回測，取該日收盤價（yfinance end 為 exclusive，故 end=as_of_date+1）。
+    使用多數據源取當前價（最近收盤）。
+    as_of_date 有值時為回測，取該日收盤價。
     backtest_start 有值時限制數據 range（之前看不到）。
+    
+    數據源優先順序：Yahoo → Stooq → FMP → Twelve Data → ...
     """
     try:
-        t = yf.Ticker(ticker)
         if as_of_date:
-            # yfinance end 為 exclusive，要含 as_of_date 當日收盤須用次日
-            end_date = as_of_date + timedelta(days=1) if hasattr(as_of_date, "strftime") else as_of_date
-            end_str = end_date.strftime("%Y-%m-%d") if hasattr(end_date, "strftime") else str(end_date)
-            if backtest_start:
-                start_str = backtest_start.strftime("%Y-%m-%d") if hasattr(backtest_start, "strftime") else str(backtest_start)
-                hist = t.history(start=start_str, end=end_str)
+            # 回測模式：取 as_of_date 當日收盤價
+            if hasattr(as_of_date, "strftime"):
+                target_date = as_of_date
             else:
-                hist = t.history(period="5d", end=end_str)
+                target_date = datetime.strptime(str(as_of_date), "%Y-%m-%d").date()
+            
+            # 使用多數據源統一介面
+            close = get_close_on_date(ticker, target_date)
+            return close
         else:
-            hist = t.history(period="5d")
-        if hist is not None and not hist.empty:
-            return float(hist["Close"].iloc[-1])
-        if as_of_date:
-            return None
-        info = t.info
-        return info.get("regularMarketPrice") or info.get("currentPrice") or None
+            # 即時模式：取今日收盤價
+            today = date.today()
+            close = get_close_on_date(ticker, today)
+            if close is not None:
+                return close
+            
+            # 若今日無資料（可能還沒收盤或休市），取昨日
+            yesterday = today - timedelta(days=1)
+            return get_close_on_date(ticker, yesterday)
     except Exception:
         return None
 

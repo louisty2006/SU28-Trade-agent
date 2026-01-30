@@ -414,24 +414,46 @@ def main():
     parser.add_argument('--test', action='store_true', help='快速測試 Stage 3')
     parser.add_argument('--test-all', action='store_true', dest='test_all', help='小樣本跑完 Stage 1→2→3（約 15 檔）')
     parser.add_argument('--daily', action='store_true', help='每日合一：Stage 1→2→3 ＋ 持倉監控 ＋ 今日最好決定，單一報告目錄')
-    parser.add_argument('--backtest', metavar='YYYY-MM-DD', default=None, help='回測模式：以該日為準取歷史數據，報告寫入 reports/backtest/YYYY-MM-DD')
+    parser.add_argument('--backtest', nargs='+', metavar='YYYY-MM-DD', default=None,
+                        help='回測：單日 --backtest 2025-01-10；區間 --backtest 2025-01-01 2025-01-15')
+    parser.add_argument('--quick', action='store_true', help='回測區間時小股數加快（每日約 15 檔）')
     parser.add_argument('--positions', default=None, help='持倉表 CSV 路徑（預設 data/positions.csv；可指定報告內 positions_edit.csv）')
     
     args = parser.parse_args()
     
     as_of_date = None
     if args.backtest:
-        try:
-            as_of_date = datetime.strptime(args.backtest, "%Y-%m-%d").date()
-        except ValueError:
-            print(f"❌ --backtest 格式須為 YYYY-MM-DD，例如 --backtest 2023-06-15")
+        if len(args.backtest) == 1:
+            try:
+                as_of_date = datetime.strptime(args.backtest[0], "%Y-%m-%d").date()
+            except ValueError:
+                print(f"❌ --backtest 格式須為 YYYY-MM-DD，例如 --backtest 2023-06-15")
+                return
+            try:
+                run_daily_unified(positions_path=args.positions, as_of_date=as_of_date)
+            except Exception as e:
+                print(f"❌ 回測 run 錯誤: {e}")
+                import traceback
+                traceback.print_exc()
+        elif len(args.backtest) == 2:
+            try:
+                start_dt = datetime.strptime(args.backtest[0], "%Y-%m-%d").date()
+                end_dt = datetime.strptime(args.backtest[1], "%Y-%m-%d").date()
+            except ValueError:
+                print("❌ --backtest 區間格式須為 YYYY-MM-DD YYYY-MM-DD，例如 --backtest 2025-01-01 2025-01-15")
+                return
+            if start_dt >= end_dt:
+                print("❌ 結束日期須晚於開始日期")
+                return
+            try:
+                run_backtest_range(start_dt, end_dt, quick=args.quick)
+            except Exception as e:
+                print(f"❌ 回測 run 錯誤: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print("❌ --backtest 請給 1 個日期（單日）或 2 個日期（區間），例如 --backtest 2025-01-01 2025-01-15 --quick")
             return
-        try:
-            run_daily_unified(positions_path=args.positions, as_of_date=as_of_date)
-        except Exception as e:
-            print(f"❌ 回測 run 錯誤: {e}")
-            import traceback
-            traceback.print_exc()
     elif args.daily:
         try:
             run_daily_unified(positions_path=args.positions)
@@ -554,7 +576,8 @@ def main():
             print("  python main.py --test    # 快速測試 Stage 3")
             print("  python main.py --test-all # 小樣本跑完 Stage 1→2→3（約 15 檔）")
             print("  python main.py --daily    # 每日合一：Stage 1→2→3 ＋ 持倉 ＋ 今日最好決定（單一報告）")
-            print("  python main.py --backtest 2023-06-15  # 回測：以該日為準取歷史數據")
+            print("  python main.py --backtest 2025-01-10  # 回測單日")
+            print("  python main.py --backtest 2025-01-01 2025-01-15 --quick  # 回測區間（小股數加快）")
             print("  python main.py --daily --positions reports/daily/YYYY-MM-DD/positions_edit.csv  # 使用人手改動後的持倉")
             print("\n💡 --daily 會建立 reports/daily/日期/，內含 positions_edit.csv 可人手改動持倉")
             print("💡 --backtest 供回測用，數據與 LLM 情境皆截至指定日")
