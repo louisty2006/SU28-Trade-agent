@@ -3,10 +3,10 @@ Stage 3: Multi-Agent LLM 討論系統 v4.2
 四個 LLM 進行投資分析討論，產生最終 Top 20
 
 LLM 配置：
-- Gemini 2.5 Flash: 基本面分析師
+- Scitely (Qwen3 235B Instruct): 基本面分析師
 - Cohere Command R: 技術面分析師  
 - Mistral Small: 風險評估師
-- HuggingFace Qwen 72B: 宏觀分析師 🆕
+- OpenRouter (Llama 3.1 8B): 宏觀分析師
 
 討論流程：
 - Round 1: 各自獨立分析
@@ -23,15 +23,26 @@ from datetime import datetime
 from typing import List, Dict
 import pandas as pd
 from dotenv import load_dotenv
+from config import REIKAN_STAGE1_CSV, REIKAN_STAGE2_CSV, REIKAN_STAGE3_CSV, REIKAN_STAGE3_JSON
 
-load_dotenv()
+# 依序嘗試多個 .env 路徑，後面的用 override=True 覆蓋（確保主專案 key 生效）
+_env_dir = os.path.dirname(os.path.abspath(__file__))
+_env_candidates = [
+    os.path.join(_env_dir, ".env"),           # 腳本同目錄
+    os.path.expanduser("~/stock_scanner/.env"),
+    os.path.join(_env_dir, "..", ".env"),
+]
+load_dotenv()  # 先載入 cwd
+for path in _env_candidates:
+    if path and os.path.isfile(path):
+        load_dotenv(path, override=True)
 
 # === LLM 配置 ===
 LLM_CONFIG = {
-    "gemini": {
+    "scitely": {
         "name": "基本面分析師",
-        "model": "gemini-2.5-flash",
-        "api_key_env": "GEMINI_API_KEY",
+        "model": "qwen3-235b-a22b-instruct",
+        "api_key_env": "SCITELY_API_KEY",
         "focus": "財務報表、營收、獲利能力、估值"
     },
     "cohere": {
@@ -46,10 +57,10 @@ LLM_CONFIG = {
         "api_key_env": "MISTRAL_API_KEY",
         "focus": "風險因素、波動性、下行風險、止損位"
     },
-    "huggingface": {
+    "openrouter": {
         "name": "宏觀分析師",
-        "model": "Qwen/Qwen2.5-72B-Instruct",
-        "api_key_env": "HUGGINGFACE_API_KEY",
+        "model": "meta-llama/llama-3.1-8b-instruct",
+        "api_key_env": "OPENROUTER_API_KEY",
         "focus": "宏觀經濟、行業趨勢、市場情緒、長期展望"
     }
 }
@@ -57,14 +68,21 @@ LLM_CONFIG = {
 class Stage3Discussion:
     """Stage 3: 四人 LLM 討論系統"""
     
-    def __init__(self):
+    def __init__(self, output_dir: str = None):
+        self.output_dir = output_dir  # 本次運行資料夾（main 傳入時報告寫入此目錄）
         self.results = []
         self.discussion_log = []
         self.api_keys = self._load_api_keys()
         
     def _load_api_keys(self) -> Dict:
         """載入 API Keys"""
+        # 診斷：列出嘗試過的 .env 路徑（方便排查 key 未載入問題）
+        print("  📂 .env 路徑嘗試：")
+        for p in _env_candidates:
+            ex = "存在" if (p and os.path.isfile(p)) else "不存在"
+            print(f"     {ex}: {p}")
         keys = {}
+        missing = []
         for llm_id, config in LLM_CONFIG.items():
             key = os.getenv(config["api_key_env"])
             if key:
@@ -72,31 +90,63 @@ class Stage3Discussion:
                 print(f"  ✅ {config['name']} ({llm_id}) API Key 已載入")
             else:
                 print(f"  ⚠️ {config['name']} ({llm_id}) API Key 未設置")
+                missing.append((llm_id, config["api_key_env"]))
+        if missing:
+            print("  💡 請在 .env 中新增以下變數（變數名必須完全一致）：")
+            for llm_id, env_name in missing:
+                print(f"     {env_name}=你的key")
         return keys
     
-    def _call_gemini(self, prompt: str) -> str:
-        """呼叫 Gemini API"""
-        api_key = self.api_keys.get("gemini")
+    def _call_scitely(self, prompt: str) -> str:
+        """呼叫 Scitely API（OpenAI-compatible）。5xx 時自動重試最多 2 次。"""
+        api_key = self.api_keys.get("scitely")
         if not api_key:
             return ""
         
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+        url = "https://api.scitely.com/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        model = LLM_CONFIG["scitely"]["model"]
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+        }
         
-        try:
-            response = requests.post(url, json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.3}
-            }, timeout=60)
-            
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-            else:
-                print(f"    Gemini 錯誤: {response.status_code}")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(url, headers=headers, json=body, timeout=60)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                
+                if 500 <= response.status_code < 600 and attempt < max_retries - 1:
+                    wait = 3 + attempt * 2
+                    print(f"    Scitely 錯誤: {response.status_code}，{wait} 秒後重試 ({attempt + 1}/{max_retries - 1})")
+                    time.sleep(wait)
+                    continue
+                
+                print(f"    Scitely 錯誤: {response.status_code}")
+                try:
+                    err = response.json()
+                    msg = err.get("error", {}).get("message", str(err))[:400]
+                    print(f"    詳情: {msg}")
+                except Exception:
+                    print(f"    詳情: {response.text[:400]}")
                 return ""
-        except Exception as e:
-            print(f"    Gemini 異常: {str(e)[:50]}")
-            return ""
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait = 3 + attempt * 2
+                    print(f"    Scitely 異常: {str(e)[:50]}，{wait} 秒後重試")
+                    time.sleep(wait)
+                else:
+                    print(f"    Scitely 異常: {str(e)[:80]}")
+                    return ""
+        return ""
     
     def _call_cohere(self, prompt: str) -> str:
         """呼叫 Cohere API (Chat API)"""
@@ -157,46 +207,54 @@ class Stage3Discussion:
             print(f"    Mistral 異常: {str(e)[:50]}")
             return ""
     
-    def _call_huggingface(self, prompt: str) -> str:
-        """呼叫 HuggingFace Router API (Qwen 72B)"""
-        api_key = self.api_keys.get("huggingface")
+    def _call_openrouter(self, prompt: str) -> str:
+        """呼叫 OpenRouter API（OpenAI-compatible）"""
+        api_key = self.api_keys.get("openrouter")
         if not api_key:
             return ""
         
-        url = "https://router.huggingface.co/v1/chat/completions"
+        url = "https://openrouter.ai/api/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+        }
+        model = LLM_CONFIG["openrouter"]["model"]
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 2000,
+            "temperature": 0.3,
         }
         
         try:
-            response = requests.post(url, headers=headers, json={
-                "model": "Qwen/Qwen2.5-72B-Instruct",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 2000,
-                "temperature": 0.3
-            }, timeout=60)
+            response = requests.post(url, headers=headers, json=body, timeout=60)
             
             if response.status_code == 200:
                 data = response.json()
                 return data.get("choices", [{}])[0].get("message", {}).get("content", "")
             else:
-                print(f"    HuggingFace 錯誤: {response.status_code}")
+                print(f"    OpenRouter 錯誤: {response.status_code}")
+                try:
+                    err = response.json()
+                    msg = err.get("error", {}).get("message", str(err))[:400]
+                    print(f"    詳情: {msg}")
+                except Exception:
+                    print(f"    詳情: {response.text[:400]}")
                 return ""
         except Exception as e:
-            print(f"    HuggingFace 異常: {str(e)[:50]}")
+            print(f"    OpenRouter 異常: {str(e)[:80]}")
             return ""
     
     def _call_llm(self, llm_id: str, prompt: str) -> str:
         """統一呼叫 LLM"""
-        if llm_id == "gemini":
-            return self._call_gemini(prompt)
+        if llm_id == "scitely":
+            return self._call_scitely(prompt)
         elif llm_id == "cohere":
             return self._call_cohere(prompt)
         elif llm_id == "mistral":
             return self._call_mistral(prompt)
-        elif llm_id == "huggingface":
-            return self._call_huggingface(prompt)
+        elif llm_id == "openrouter":
+            return self._call_openrouter(prompt)
         return ""
     
     def _extract_json(self, text: str) -> dict:
@@ -228,22 +286,37 @@ class Stage3Discussion:
         """載入 Stage 2 結果"""
         print("📂 自動尋找最新 Stage 2 結果...")
         
-        # 優先找 Stage 2
+        # 本次運行資料夾內有 REIKAN_stage2_results.csv 時優先使用
+        if self.output_dir:
+            candidate = os.path.join(self.output_dir, REIKAN_STAGE2_CSV)
+            if os.path.exists(candidate):
+                print(f"✅ 使用 Stage 2 結果：{candidate}")
+                return pd.read_csv(candidate)
+        
+        # 優先找 Stage 2（試 REIKAN 檔名再試舊檔名）
         if os.path.exists("reports/stage2"):
             for dirname in sorted(os.listdir("reports/stage2"), reverse=True):
-                csv_path = os.path.join("reports/stage2", dirname, "stage2_results.csv")
-                if os.path.exists(csv_path):
-                    print(f"✅ 使用 Stage 2 結果：{csv_path}")
-                    return pd.read_csv(csv_path)
+                sub = os.path.join("reports/stage2", dirname)
+                if not os.path.isdir(sub):
+                    continue
+                for fname in (REIKAN_STAGE2_CSV, "stage2_results.csv"):
+                    csv_path = os.path.join(sub, fname)
+                    if os.path.exists(csv_path):
+                        print(f"✅ 使用 Stage 2 結果：{csv_path}")
+                        return pd.read_csv(csv_path)
         
-        # 退而找 Stage 1
+        # 退而找 Stage 1（試 REIKAN 檔名再試舊檔名）
         print("📂 嘗試尋找 Stage 1 結果...")
         if os.path.exists("reports/stage1"):
             for dirname in sorted(os.listdir("reports/stage1"), reverse=True):
-                csv_path = os.path.join("reports/stage1", dirname, "stage1_results.csv")
-                if os.path.exists(csv_path):
-                    print(f"✅ 使用 Stage 1 結果：{csv_path}")
-                    return pd.read_csv(csv_path)
+                sub = os.path.join("reports/stage1", dirname)
+                if not os.path.isdir(sub):
+                    continue
+                for fname in (REIKAN_STAGE1_CSV, "stage1_results.csv"):
+                    csv_path = os.path.join(sub, fname)
+                    if os.path.exists(csv_path):
+                        print(f"✅ 使用 Stage 1 結果：{csv_path}")
+                        return pd.read_csv(csv_path)
         
         # 找測試結果
         if os.path.exists("reports/test/test_stage1.csv"):
@@ -277,10 +350,11 @@ class Stage3Discussion:
             
             print(f"\n🤖 {config['name']} ({llm_id}) 分析中...")
             
+            date_note = f"\n（以下數據截至 {self._as_of_date}，回測情境。）\n" if getattr(self, '_as_of_date', None) else "\n"
             prompt = f"""你是一位專業的{config['name']}，專注於{config['focus']}。
 
 請分析以下股票，為每支股票給出 0-100 的評分和簡短理由。
-
+{date_note}
 股票數據：
 {stock_summary}
 
@@ -298,7 +372,7 @@ class Stage3Discussion:
                 print(f"  ✅ 分析完成，評估了 {len(parsed)} 支股票")
             else:
                 results[llm_id] = {"parsed": {}, "raw": response}
-                print(f"  ⚠️ 無法解析 JSON")
+                print(f"  ⚠️ 無法解析 JSON（該分析師暫時不可用，其餘分析師仍會參與投票）")
             
             time.sleep(1)
         
@@ -391,12 +465,12 @@ class Stage3Discussion:
             avg_score = sum(data["scores"]) / len(data["scores"]) if data["scores"] else 0
             votes = data["votes"]
             
-            # 決定共識
+            # 決定共識（避開 = 不建議買入，無持倉時不會被誤解為「賣出持倉」）
             if votes["buy"] >= 2:
                 consensus = "買入"
                 passed += 1
             elif votes["sell"] >= 2:
-                consensus = "賣出"
+                consensus = "避開"
                 rejected += 1
             else:
                 consensus = "觀望"
@@ -416,13 +490,13 @@ class Stage3Discussion:
         
         return final_results
     
-    def run(self, top_n: int = 20) -> List[Dict]:
-        """執行完整討論流程"""
+    def run(self, top_n: int = 20, as_of_date=None) -> List[Dict]:
+        """執行完整討論流程。as_of_date 有值時為回測，提示「數據截至該日」。"""
+        self._as_of_date = as_of_date.strftime("%Y-%m-%d") if as_of_date and hasattr(as_of_date, 'strftime') else (as_of_date or "")
         print("\n" + "="*70)
         print("🤖 Stage 3: Multi-Agent LLM 討論系統 (4人版)")
         print("="*70)
         
-        # 載入數據
         df = self.load_stage2_results()
         if df.empty:
             print("❌ 無數據可分析")
@@ -431,7 +505,6 @@ class Stage3Discussion:
         stocks = df.head(top_n * 2).to_dict('records')
         print(f"\n📊 總共 {len(stocks)} 支股票待討論")
         
-        # 分組討論
         group_size = 10
         all_results = []
         
@@ -443,7 +516,6 @@ class Stage3Discussion:
             print(f"# 第 {group_id} 組討論 ({len(group)} 支股票)")
             print(f"{'#'*60}")
             
-            # Round 1
             round1_results = self.run_round1(group, group_id)
             
             # Round 2
@@ -464,6 +536,7 @@ class Stage3Discussion:
         print(f"{'='*70}")
         
         for i, r in enumerate(self.results[:10], 1):
+            # 買入=建議買入, 觀望=觀望, 避開=不建議（無持倉時不會被誤解為賣出持倉）
             emoji = "🟢" if r["consensus"] == "買入" else "🟡" if r["consensus"] == "觀望" else "🔴"
             print(f" {i:2}. {r['ticker']:6} | {r['final_score']:5.1f}分 | {emoji} {r['consensus']}")
         
@@ -472,15 +545,19 @@ class Stage3Discussion:
     def save_report(self) -> str:
         """儲存報告"""
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
-        output_dir = f"reports/stage3/{timestamp}"
-        os.makedirs(output_dir, exist_ok=True)
+        if self.output_dir:
+            output_dir = self.output_dir
+            os.makedirs(output_dir, exist_ok=True)
+        else:
+            output_dir = f"reports/stage3/{timestamp}"
+            os.makedirs(output_dir, exist_ok=True)
         
         # CSV
         df = pd.DataFrame(self.results)
-        df.to_csv(f"{output_dir}/stage3_top20.csv", index=False)
+        df.to_csv(os.path.join(output_dir, REIKAN_STAGE3_CSV), index=False)
         
         # JSON
-        with open(f"{output_dir}/stage3_discussion.json", "w", encoding="utf-8") as f:
+        with open(os.path.join(output_dir, REIKAN_STAGE3_JSON), "w", encoding="utf-8") as f:
             json.dump({
                 "timestamp": datetime.now().isoformat(),
                 "llm_config": {k: {"name": v["name"], "model": v["model"]} for k, v in LLM_CONFIG.items()},

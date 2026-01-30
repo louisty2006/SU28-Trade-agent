@@ -13,16 +13,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 import time
 
-from config import STAGE2_CONFIG, STAGE2_DIR
+from config import STAGE2_CONFIG, STAGE2_DIR, REIKAN_STAGE1_CSV, REIKAN_STAGE2_CSV, REIKAN_STAGE2_HTML
 from utils.data_fetcher import data_fetcher
 from utils.scoring import calculate_stage2_score, get_score_explanation
 
 
 class Stage2Verifier:
-    """Stage 2 深度驗證器"""
+    """Stage 2 深度驗證器。as_of_date 有值時為回測模式，用 yfinance 季度財報截至該日。"""
     
-    def __init__(self, stage1_results_path: str = None):
+    def __init__(self, stage1_results_path: str = None, output_dir: str = None, as_of_date=None, backtest_start=None):
         self.stage1_path = stage1_results_path
+        self.output_dir = output_dir
+        self.as_of_date = as_of_date
+        self.backtest_start = backtest_start  # 回測起始日；數據 range 限制
         self.results = []
         self.results_lock = Lock()
         self.count = 0
@@ -36,6 +39,14 @@ class Stage2Verifier:
         if self.stage1_path and os.path.exists(self.stage1_path):
             print(f"📂 載入 Stage 1 結果：{self.stage1_path}")
             return pd.read_csv(self.stage1_path)
+        
+        # 本次運行資料夾內優先 REIKAN_stage1_results.csv，其次 stage1_results.csv（向後相容）
+        if self.output_dir:
+            for name in (REIKAN_STAGE1_CSV, "stage1_results.csv"):
+                candidate = os.path.join(self.output_dir, name)
+                if os.path.exists(candidate):
+                    print(f"📂 載入 Stage 1 結果：{candidate}")
+                    return pd.read_csv(candidate)
         
         # 自動尋找最新的 Stage 1 檔案
         import glob
@@ -57,29 +68,31 @@ class Stage2Verifier:
             ticker = row.get('ticker') or row.get('symbol')
             stage1_score = float(row['score'])
             
-            # === Yahoo Finance 詳細資訊 ===
             with self.api_lock:
                 self.api_calls['yahoo'] += 1
             
-            yahoo_info = data_fetcher.get_yahoo_info(ticker)
+            if self.as_of_date:
+                as_of_str = self.as_of_date.strftime("%Y-%m-%d") if hasattr(self.as_of_date, 'strftime') else str(self.as_of_date)
+                start_str = self.backtest_start.strftime("%Y-%m-%d") if self.backtest_start and hasattr(self.backtest_start, 'strftime') else (str(self.backtest_start) if self.backtest_start else None)
+                yahoo_info = data_fetcher.get_yahoo_financials_as_of(ticker, as_of_str, backtest_start=start_str)
+                fmp_profile = None
+                fmp_ratios = None
+            else:
+                yahoo_info = data_fetcher.get_yahoo_info(ticker)
+                if yahoo_info is None:
+                    return None
+                fmp_profile = None
+                fmp_ratios = None
+                if STAGE2_CONFIG.get('use_fmp', False) and data_fetcher.fmp_api_key:
+                    with self.api_lock:
+                        self.api_calls['fmp'] += 2
+                    fmp_profile = data_fetcher.get_fmp_profile(ticker)
+                    fmp_ratios = data_fetcher.get_fmp_ratios(ticker)
+                    data_fetcher.rate_limit_sleep()
+            
             if yahoo_info is None:
                 return None
             
-            # === FMP 數據（如果有 API Key）===
-            fmp_profile = None
-            fmp_ratios = None
-            
-            if STAGE2_CONFIG.get('use_fmp', False) and data_fetcher.fmp_api_key:
-                with self.api_lock:
-                    self.api_calls['fmp'] += 2
-                
-                fmp_profile = data_fetcher.get_fmp_profile(ticker)
-                fmp_ratios = data_fetcher.get_fmp_ratios(ticker)
-                
-                # API 限速
-                data_fetcher.rate_limit_sleep()
-            
-            # === 提取財務數據 ===
             financial_data = data_fetcher.extract_financial_data(
                 yahoo_info, fmp_profile, fmp_ratios
             )
@@ -119,8 +132,7 @@ class Stage2Verifier:
                 'profit_margin': round(financial_data['profit_margin'], 2),
                 'beta': round(financial_data['beta'], 2),
                 
-                # 數據來源標記
-                'data_source': 'Yahoo+FMP' if fmp_ratios else 'Yahoo',
+                'data_source': 'Backtest(Yahoo)' if self.as_of_date else ('Yahoo+FMP' if fmp_ratios else 'Yahoo'),
             }
             
             return result
@@ -249,21 +261,25 @@ class Stage2Verifier:
             return ""
         
         timestamp = datetime.now().strftime('%Y-%m-%d_%H%M')
-        output_dir = os.path.join(STAGE2_DIR, f"{timestamp}_stage2")
-        os.makedirs(output_dir, exist_ok=True)
+        if self.output_dir:
+            output_dir = self.output_dir
+            os.makedirs(output_dir, exist_ok=True)
+        else:
+            output_dir = os.path.join(STAGE2_DIR, f"{timestamp}_stage2")
+            os.makedirs(output_dir, exist_ok=True)
         
         # CSV
-        csv_path = os.path.join(output_dir, "stage2_results.csv")
+        csv_path = os.path.join(output_dir, REIKAN_STAGE2_CSV)
         df.to_csv(csv_path, index=False, encoding='utf-8-sig')
         
         # HTML 報告
-        html_path = os.path.join(output_dir, "stage2_report.html")
+        html_path = os.path.join(output_dir, REIKAN_STAGE2_HTML)
         self._generate_html_report(df, html_path, timestamp)
         
         print(f"\n💾 結果已儲存：")
         print(f"   📁 目錄：{output_dir}/")
-        print(f"   📄 CSV：stage2_results.csv")
-        print(f"   📊 HTML：stage2_report.html")
+        print(f"   📄 CSV：{REIKAN_STAGE2_CSV}")
+        print(f"   📊 HTML：{REIKAN_STAGE2_HTML}")
         
         return output_dir
     
@@ -276,30 +292,33 @@ class Stage2Verifier:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stage 2 深度驗證報告 - {timestamp}</title>
+    <title>REISHI 深度驗證報告 - {timestamp}</title>
     <style>
         body {{ 
             font-family: Arial, sans-serif; 
-            background: #1a1a2e; 
-            color: #eee; 
+            background: #0d1117; 
+            color: #e6edf3; 
             padding: 20px;
         }}
         .container {{ max-width: 1400px; margin: 0 auto; }}
-        h1 {{ color: #00d9ff; text-align: center; }}
-        h2 {{ color: #00ff88; }}
+        .reikan-brand {{ text-align: center; margin-bottom: 24px; padding: 16px; background: linear-gradient(135deg, #1A237E 0%%, #3949AB 50%%, #00BCD4 100%%); border-radius: 8px; color: #fff; }}
+        .reikan-brand h1 {{ margin: 0; font-size: 1.8em; color: #fff; }}
+        .reikan-brand p {{ margin: 8px 0 0; opacity: 0.95; font-size: 0.95em; }}
+        h1 {{ color: #00BCD4; text-align: center; }}
+        h2 {{ color: #7C4DFF; border-bottom: 1px solid #3949AB; padding-bottom: 6px; }}
         table {{ 
             width: 100%; 
             border-collapse: collapse; 
             margin: 20px 0;
-            background: rgba(255,255,255,0.05);
+            background: rgba(26, 35, 126, 0.15);
             font-size: 0.9em;
         }}
         th, td {{ 
             padding: 10px; 
             text-align: left; 
-            border-bottom: 1px solid rgba(255,255,255,0.1);
+            border-bottom: 1px solid rgba(0, 188, 212, 0.2);
         }}
-        th {{ background: rgba(0,217,255,0.2); color: #00d9ff; }}
+        th {{ background: rgba(26, 35, 126, 0.5); color: #00BCD4; }}
         .score-high {{ color: #00ff88; font-weight: bold; }}
         .score-mid {{ color: #ffd700; font-weight: bold; }}
         .positive {{ color: #00ff88; }}
@@ -310,8 +329,12 @@ class Stage2Verifier:
 </head>
 <body>
     <div class="container">
-        <h1>🔍 Stage 2 深度驗證報告</h1>
-        <p style="text-align: center; color: #888;">
+        <div class="reikan-brand">
+            <h1>🔮 REISHI (霊視)</h1>
+            <p>洞察本質，智贏未來 | AI Market Insight</p>
+        </div>
+        <h1>🔍 REISHI 深度驗證報告</h1>
+        <p style="text-align: center; color: #9E9E9E;">
             {timestamp} | 共驗證 {len(df)} 支股票
         </p>
         
@@ -371,8 +394,8 @@ class Stage2Verifier:
             <tr><td>平均 ROE</td><td>{df['roe'].mean():.1f}%</td></tr>
         </table>
         
-        <p style="text-align: center; color: #888; margin-top: 40px;">
-            ➡️ 接下來：執行 Stage 3 Multi-Agent LLM 討論
+        <p style="text-align: center; color: #9E9E9E; margin-top: 40px;">
+            ➡️ REISHI Stage 3 Multi-Agent LLM 討論
         </p>
     </div>
 </body>
@@ -396,7 +419,7 @@ def main():
     if not df.empty:
         output_dir = verifier.save_results(df)
         print(f"\n✅ Stage 2 完成，請繼續執行 Stage 3")
-        print(f"   輸入資料：{output_dir}/stage2_results.csv")
+        print(f"   輸入資料：{output_dir}/{REIKAN_STAGE2_CSV}")
 
 
 if __name__ == "__main__":

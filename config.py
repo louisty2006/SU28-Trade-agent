@@ -269,3 +269,21 @@ FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
 QUANDL_BASE_URL = "https://data.nasdaq.com/api/v3"
 ALPHA_VANTAGE_BASE_URL = "https://www.alphavantage.co/query"
 MARKETSTACK_BASE_URL = "https://api.marketstack.com/v1"
+
+# ---------------------------------------------------------------------------
+# REISHI 品牌（霊視）- 報告與 log 檔名（全面使用 REIKAN_ 前綴，以保持兼容性）
+# ---------------------------------------------------------------------------
+REIKAN_PREFIX = "REIKAN_"  # 保持檔名前綴（避免破壞現有報告）
+REIKAN_RUN_LOG = REIKAN_PREFIX + "run.log"
+REIKAN_STAGE1_CSV = REIKAN_PREFIX + "stage1_results.csv"
+REIKAN_STAGE2_CSV = REIKAN_PREFIX + "stage2_results.csv"
+REIKAN_STAGE2_HTML = REIKAN_PREFIX + "stage2_report.html"
+REIKAN_STAGE3_CSV = REIKAN_PREFIX + "stage3_top20.csv"
+REIKAN_STAGE3_JSON = REIKAN_PREFIX + "stage3_discussion.json"
+REIKAN_DAILY_TXT = REIKAN_PREFIX + "daily_report.txt"
+REIKAN_DAILY_JSON = REIKAN_PREFIX + "daily_report.json"
+
+# 品牌名稱（顯示用）
+APP_NAME = "REISHI"  # 霊視
+APP_NAME_JP = "霊視"
+VERSION = "4.3"

@@ -12,6 +12,7 @@ import os
 import random
 import warnings
 warnings.filterwarnings('ignore')
+from config import REIKAN_STAGE1_CSV
 
 class Stage1Scanner:
     def __init__(self, stock_file='COMPLETE_ALL_STOCKS_FINAL.csv', output_dir='reports/stage1'):
@@ -35,13 +36,18 @@ class Stage1Scanner:
             return symbols
         return ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'META', 'NVDA', 'AMD']
     
-    def calculate_score(self, symbol, retry=0):
+    def calculate_score(self, symbol, retry=0, as_of_date=None, backtest_start=None):
         try:
-            # 隨機延遲，分散請求
             time.sleep(random.uniform(0.1, 0.3))
             
             stock = yf.Ticker(symbol)
-            hist = stock.history(period='3mo')
+            if as_of_date:
+                if backtest_start:
+                    hist = stock.history(start=backtest_start, end=as_of_date)
+                else:
+                    hist = stock.history(period='3mo', end=as_of_date)
+            else:
+                hist = stock.history(period='3mo')
             
             if hist.empty or len(hist) < 20:
                 return None
@@ -114,28 +120,38 @@ class Stage1Scanner:
             if 'rate' in err or 'too many' in err:
                 self.rate_limited = True
                 if retry < 2:
-                    time.sleep(3 + retry * 2)  # 逐漸增加等待時間
-                    return self.calculate_score(symbol, retry + 1)
+                    time.sleep(3 + retry * 2)
+                    return self.calculate_score(symbol, retry + 1, as_of_date=as_of_date, backtest_start=backtest_start)
             return None
     
-    def run(self, top_n=500, max_workers=3):  # 降到 3 線程
+    def run(self, top_n=500, max_workers=3, max_stocks=None, as_of_date=None, backtest_start=None):
+        """
+        max_stocks: 小樣本時只掃前 N 檔。
+        as_of_date: 回測時數據截至該日。
+        backtest_start: 回測時數據起始日（range 之前看不到）。
+        """
         print("=" * 70)
         print("🚀 Stage 1: 快速篩選啟動（限流保護模式）")
         print("=" * 70)
         
         symbols = self.load_stocks()
+        if max_stocks is not None:
+            symbols = symbols[:max_stocks]
+            print(f"\n🧪 小樣本模式：只掃前 {max_stocks} 檔")
         total = len(symbols)
         
         print(f"\n📊 總共 {total:,} 支股票")
         print(f"⚡ 並行線程：{max_workers}（保守模式）")
         print(f"🎯 目標輸出：Top {top_n}\n")
         
+        end_str = as_of_date.strftime("%Y-%m-%d") if hasattr(as_of_date, 'strftime') else (as_of_date or "")
+        start_str = backtest_start.strftime("%Y-%m-%d") if backtest_start and hasattr(backtest_start, 'strftime') else (backtest_start or "")
         start_time = time.time()
         results = []
         consecutive_fails = 0
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(self.calculate_score, s): s for s in symbols}
+            futures = {executor.submit(self.calculate_score, s, 0, end_str or None, start_str or None): s for s in symbols}
             
             for i, future in enumerate(as_completed(futures), 1):
                 symbol = futures[future]
@@ -177,7 +193,11 @@ class Stage1Scanner:
         if top_results:
             df = pd.DataFrame(top_results)
             timestamp = datetime.now().strftime('%Y-%m-%d_%H%M')
-            output_file = f"{self.output_dir}/{timestamp}_stage1.csv"
+            # 本次運行資料夾（main 傳入 run_dir）時用固定檔名，方便 Stage 2 讀取
+            if self.output_dir == 'reports/stage1':
+                output_file = f"{self.output_dir}/{timestamp}_stage1.csv"
+            else:
+                output_file = os.path.join(self.output_dir, REIKAN_STAGE1_CSV)
             df.to_csv(output_file, index=False)
             
             print("\n" + "=" * 70)

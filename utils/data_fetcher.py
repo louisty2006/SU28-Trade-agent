@@ -1,11 +1,12 @@
 """
 數據獲取工具模組
+支援回測：end_date / as_of_date 時取該日為止的歷史數據。
 """
 import yfinance as yf
 import pandas as pd
 import requests
 import time
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 from config import (
     FMP_API_KEY,
     FMP_BASE_URL,
@@ -21,20 +22,21 @@ class DataFetcher:
         self.fmp_api_key = FMP_API_KEY
         self.session = requests.Session()
     
-    def get_yahoo_history(self, ticker: str, period: str = "30d") -> Optional[pd.DataFrame]:
+    def get_yahoo_history(self, ticker: str, period: str = "30d", end_date: str = None, start_date: str = None) -> Optional[pd.DataFrame]:
         """
-        獲取 Yahoo Finance 歷史數據
-        
-        Args:
-            ticker: 股票代碼
-            period: 時間週期 (1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max)
-        
-        Returns:
-            DataFrame 或 None
+        獲取 Yahoo Finance 歷史數據。
+        end_date 有值時為回測：取截至該日（含）的數據。
+        start_date 有值時限制起始（回測 range 之前看不到）。
         """
         try:
             stock = yf.Ticker(ticker)
-            hist = stock.history(period=period)
+            if end_date:
+                if start_date:
+                    hist = stock.history(start=start_date, end=end_date)
+                else:
+                    hist = stock.history(period=period, end=end_date)
+            else:
+                hist = stock.history(period=period)
             
             if hist.empty:
                 return None
@@ -45,8 +47,7 @@ class DataFetcher:
     
     def get_yahoo_info(self, ticker: str) -> Optional[Dict]:
         """
-        獲取 Yahoo Finance 股票基本資訊
-        
+        獲取 Yahoo Finance 股票基本資訊（當前快照）。
         Returns:
             包含股票資訊的字典
         """
@@ -60,6 +61,110 @@ class DataFetcher:
                 return None
             
             return info
+        except Exception as e:
+            return None
+
+    def get_yahoo_financials_as_of(self, ticker: str, as_of_date: str, backtest_start: str = None) -> Optional[Dict[str, Any]]:
+        """
+        回測用：取截至 as_of_date 的財報與股價。
+        backtest_start 有值時限制數據起始（range 之前看不到）。
+        """
+        try:
+            stock = yf.Ticker(ticker)
+            if backtest_start:
+                hist = stock.history(start=backtest_start, end=as_of_date)
+            else:
+                hist = stock.history(period="5d", end=as_of_date)
+            if hist is None or hist.empty:
+                return None
+            price = float(hist["Close"].iloc[-1])
+
+            inc = getattr(stock, "quarterly_income_stmt", None)
+            bal = getattr(stock, "quarterly_balance_sheet", None)
+            if inc is None or bal is None:
+                return None
+            inc_df = inc if isinstance(inc, pd.DataFrame) else pd.DataFrame()
+            bal_df = bal if isinstance(bal, pd.DataFrame) else pd.DataFrame()
+            if inc_df.empty or bal_df.empty:
+                return None
+
+            def _select_row_as_of(df: pd.DataFrame, end: str):
+                """取 index（報告期）<= end 的最近一筆 row（Series）。"""
+                try:
+                    idx = pd.to_datetime(df.index)
+                    mask = idx <= pd.Timestamp(end)
+                    if not mask.any():
+                        return df.iloc[-1] if len(df) else None
+                    return df.loc[mask].iloc[-1]
+                except Exception:
+                    return df.iloc[-1] if len(df) else None
+
+            row_inc = _select_row_as_of(inc_df, as_of_date)
+            row_bal = _select_row_as_of(bal_df, as_of_date)
+            if row_inc is None or row_bal is None:
+                return None
+
+            def _num(s: pd.Series, key: str, default=0):
+                v = s.get(key, default)
+                if pd.isna(v):
+                    return default
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return default
+
+            revenue = _num(row_inc, "Total Revenue", 0) or _num(row_inc, "Revenue", 0)
+            net_income = _num(row_inc, "Net Income", 0) or _num(row_inc, "Net Income Common Stockholders", 0)
+            total_equity = _num(row_bal, "Total Stockholder Equity", 0) or _num(row_bal, "Stockholders Equity", 0)
+            total_liab = _num(row_bal, "Total Liab", 0)
+            shares = _num(row_bal, "Share Issued", 0) or 1
+            if shares <= 0:
+                shares = 1
+            eps = _num(row_inc, "Diluted EPS", 0) or (net_income / shares if shares else 0)
+            if eps <= 0:
+                eps = _num(row_inc, "Basic EPS", 0)
+            pe = (price / eps) if eps and eps > 0 else 0
+            roe = (net_income / total_equity * 100) if total_equity and total_equity > 0 else 0
+            bps = (total_equity / shares) if total_equity and shares and total_equity > 0 else 0
+            pb = (price / bps) if bps and bps > 0 else 0
+            profit_margin = (net_income / revenue * 100) if revenue and revenue > 0 else 0
+            curr_assets = _num(row_bal, "Current Assets", 0)
+            curr_liab = _num(row_bal, "Current Liabilities", 1)
+            current_ratio = (curr_assets / curr_liab) if curr_liab and curr_liab > 0 else 1
+            debt_equity = (total_liab / total_equity) if total_equity and total_equity > 0 else 0
+
+            rev_growth = 0
+            earn_growth = 0
+            try:
+                idx = pd.to_datetime(inc_df.index)
+                mask = idx <= pd.Timestamp(as_of_date)
+                valid = inc_df.loc[mask] if mask.any() else inc_df
+                if len(valid) >= 2:
+                    prev = valid.iloc[-2]
+                    prev_rev = _num(prev, "Total Revenue", 0) or _num(prev, "Revenue", 0)
+                    prev_ni = _num(prev, "Net Income", 0) or _num(prev, "Net Income Common Stockholders", 0)
+                    if prev_rev and prev_rev > 0:
+                        rev_growth = (revenue - prev_rev) / prev_rev * 100
+                    if prev_ni and prev_ni > 0:
+                        earn_growth = (net_income - prev_ni) / prev_ni * 100
+            except Exception:
+                pass
+
+            market_cap = price * shares if shares else 0
+            return {
+                "marketCap": market_cap,
+                "sector": "Unknown",
+                "industry": "Unknown",
+                "trailingPE": pe,
+                "priceToBook": pb,
+                "currentRatio": current_ratio,
+                "debtToEquity": debt_equity,
+                "returnOnEquity": roe / 100 if roe else 0,
+                "revenueGrowth": rev_growth / 100 if rev_growth else 0,
+                "earningsGrowth": earn_growth / 100 if earn_growth else 0,
+                "profitMargins": profit_margin / 100 if profit_margin else 0,
+                "beta": 1,
+            }
         except Exception as e:
             return None
     
