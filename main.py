@@ -390,19 +390,26 @@ def main():
         
         elif choice == "2":
             print("\n📅 回測模式")
-            start_str = input("  請輸入開始日期（YYYY-MM-DD）：").strip()
-            end_str = input("  請輸入結束日期（YYYY-MM-DD）：").strip()
+            start_str = input("  請輸入開始日期（YYYY-MM-DD 或 YYYYMMDD）：").strip().replace(" ", "")
+            end_str = input("  請輸入結束日期（YYYY-MM-DD 或 YYYYMMDD）：").strip().replace(" ", "")
+            
+            def _norm_date(s):
+                """接受 YYYY-MM-DD 或 YYYYMMDD（8 位），回傳 YYYY-MM-DD"""
+                s = s.strip()
+                if len(s) == 8 and s.isdigit():
+                    return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+                return s
             
             try:
-                start_dt = datetime.strptime(start_str, "%Y-%m-%d").date()
-                end_dt = datetime.strptime(end_str, "%Y-%m-%d").date()
+                start_dt = datetime.strptime(_norm_date(start_str), "%Y-%m-%d").date()
+                end_dt = datetime.strptime(_norm_date(end_str), "%Y-%m-%d").date()
                 if start_dt >= end_dt:
                     print("❌ 結束日期必須晚於開始日期")
                     return
                 print(f"\n🔮 啟動霊視回測（{start_dt} ~ {end_dt}），數據範圍限制中...")
                 run_daily_unified(as_of_date=end_dt, backtest_start=start_dt)
-            except ValueError as e:
-                print(f"❌ 日期格式錯誤，須為 YYYY-MM-DD，例如 2023-06-15")
+            except ValueError:
+                print("❌ 日期格式錯誤，請用 YYYY-MM-DD 或 YYYYMMDD，例如 2023-06-15 或 20230101")
             except Exception as e:
                 print(f"❌ 回測 run 錯誤: {e}")
                 import traceback
