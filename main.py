@@ -190,12 +190,13 @@ def run_test():
         _stop_log(log_file, original_stdout)
 
 
-def run_daily_unified(positions_path: str = None, as_of_date: date = None, backtest_start: date = None, output_base: str = None):
+def run_daily_unified(positions_path: str = None, as_of_date: date = None, backtest_start: date = None, output_base: str = None, max_stocks: int = None, top_n: int = None):
     """
     每日合一 run：Stage 1→2→3（小範圍）＋持倉監控＋今日決策，產出單一報告目錄。
     as_of_date 有值時為回測模式：數據與情境皆截至該日。
     backtest_start 有值時：數據從該日開始（range 之前看不到）。
     output_base 有值時（僅回測）：報告目錄為 output_base/YYYY-MM-DD/，用於 365 天逐日回測。
+    max_stocks / top_n 有值時覆寫每日掃描規模（小股數回測用）。
     """
     start_time = datetime.now()
     if as_of_date and output_base:
@@ -223,9 +224,11 @@ def run_daily_unified(positions_path: str = None, as_of_date: date = None, backt
         print(f"📁 報告目錄: {run_dir_abs}")
         print("=" * 70)
 
-        run_stage1(run_dir=run_dir_abs, max_stocks=50, top_n=10, as_of_date=as_of_date, backtest_start=backtest_start)
+        _max = max_stocks if max_stocks is not None else 50
+        _top = top_n if top_n is not None else 10
+        run_stage1(run_dir=run_dir_abs, max_stocks=_max, top_n=_top, as_of_date=as_of_date, backtest_start=backtest_start)
         run_stage2(run_dir=run_dir_abs, as_of_date=as_of_date, backtest_start=backtest_start)
-        run_stage3(run_dir=run_dir_abs, top_n=10, as_of_date=as_of_date)
+        run_stage3(run_dir=run_dir_abs, top_n=_top, as_of_date=as_of_date)
 
         from daily_monitor import run_daily_monitor
         default_positions = os.path.join(os.path.dirname(__file__), "data", "positions.csv")
@@ -259,10 +262,11 @@ def run_daily_unified(positions_path: str = None, as_of_date: date = None, backt
         _stop_log(log_file, original_stdout)
 
 
-def run_backtest_range(start_dt: date, end_dt: date):
+def run_backtest_range(start_dt: date, end_dt: date, quick: bool = False):
     """
     365 天逐日回測：從 start_dt 到 end_dt 每個交易日跑一次完整 pipeline。
     決策僅用「前一交易日及之前」的數據（無偷看）；執行以當日收盤價模擬。
+    quick=True 時每日只掃少數股票（max_stocks=15, top_n=5）以加快。
     """
     from backtest_simulator import (
         get_trading_days,
@@ -295,6 +299,8 @@ def run_backtest_range(start_dt: date, end_dt: date):
     print("\n" + "=" * 70)
     print("🔮 啟動霊視，洞察市場")
     print(f"📅 回測 range：{start_dt} ~ {end_dt}，共 {len(trading_days)} 個交易日，逐日跑 pipeline")
+    if quick:
+        print("📌 小股數回測（每日少掃股票，加快）")
     print("📌 決策僅用「前一交易日及之前」數據；執行以當日收盤價（無偷看未來）")
     print("=" * 70)
     print(f"開始時間: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -314,6 +320,8 @@ def run_backtest_range(start_dt: date, end_dt: date):
             as_of_date=prev_d,
             backtest_start=backtest_start_eff,
             output_base=base_dir_abs,
+            max_stocks=15 if quick else None,
+            top_n=5 if quick else None,
         )
 
         # 報告寫在 base_dir/prev_d（as_of_date=prev_d）
@@ -502,6 +510,11 @@ def main():
         
         elif choice == "2":
             print("\n📅 回測模式")
+            print("  請選擇回測規模：")
+            print("    [1] 正常回測（完整掃描，每日約 50 檔）")
+            print("    [2] 小股數回測（少掃股票，每日約 15 檔，加快）")
+            choice2 = input("  請輸入 [1/2]: ").strip()
+            quick = choice2 == "2"
             start_str = input("  請輸入開始日期（YYYY-MM-DD 或 YYYYMMDD）：").strip().replace(" ", "")
             end_str = input("  請輸入結束日期（YYYY-MM-DD 或 YYYYMMDD）：").strip().replace(" ", "")
             
@@ -520,8 +533,9 @@ def main():
                     print("❌ 結束日期必須晚於開始日期")
                     return
                 n_days = len(get_trading_days(start_dt, end_dt))
-                print(f"\n🔮 啟動霊視回測（{start_dt} ~ {end_dt}），共 {n_days} 個交易日，逐日跑 pipeline...")
-                run_backtest_range(start_dt, end_dt)
+                mode_str = "小股數" if quick else "正常"
+                print(f"\n🔮 啟動霊視回測（{mode_str}）（{start_dt} ~ {end_dt}），共 {n_days} 個交易日，逐日跑 pipeline...")
+                run_backtest_range(start_dt, end_dt, quick=quick)
             except ValueError:
                 print("❌ 日期格式錯誤，請用 YYYY-MM-DD 或 YYYYMMDD，例如 2023-06-15 或 20230101")
             except Exception as e:
