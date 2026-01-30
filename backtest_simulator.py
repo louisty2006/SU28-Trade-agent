@@ -4,6 +4,7 @@
 - 每日僅使用「當日及之前」的數據，無偷看未來。
 - 依 AI 當日決策（持有/加碼/減碼/出場、新買入）以當日收盤價模擬執行。
 - 追蹤持倉與組合價值，產出報酬與摘要。
+- 使用 NYSE 日曆排除美國市場假日。
 """
 
 import os
@@ -20,24 +21,90 @@ from config import (
     BACKTEST_REDUCE_PCT,
 )
 
+# 懶加載 NYSE 日曆（避免頂層 import 拖慢非回測路徑）；若未安裝則僅排除週末
+_nyse_cal = None
+_nyse_cal_failed = False
 
-def get_trading_days(start: date, end: date) -> List[date]:
-    """取得 [start, end] 內的交易日（排除週六日，不排除假日）。"""
+
+def _get_nyse_calendar():
+    """取得 NYSE 交易日曆（排除週末與美國市場假日）。若未安裝 pandas_market_calendars 則回傳 None。"""
+    global _nyse_cal, _nyse_cal_failed
+    if _nyse_cal_failed:
+        return None
+    if _nyse_cal is None:
+        try:
+            import pandas_market_calendars as mcal
+            _nyse_cal = mcal.get_calendar("NYSE")
+        except Exception:
+            _nyse_cal_failed = True
+            return None
+    return _nyse_cal
+
+
+def _weekday_only_trading_days(start: date, end: date) -> List[date]:
+    """僅排除週末的交易日列表（無假日）。"""
     days = []
     d = start
     while d <= end:
-        if d.weekday() < 5:  # 0=Mon .. 4=Fri
+        if d.weekday() < 5:
             days.append(d)
         d += timedelta(days=1)
     return days
 
 
-def prev_trading_day(d: date) -> date:
-    """d 的前一個交易日（不含週末）。"""
+def _weekday_only_prev(d: date) -> date:
+    """僅排除週末的前一「交易日」。"""
     out = d - timedelta(days=1)
     while out.weekday() >= 5:
         out -= timedelta(days=1)
     return out
+
+
+def get_trading_days(start: date, end: date) -> List[date]:
+    """取得 [start, end] 內的美國市場交易日（排除週末與假日；若未安裝 pandas_market_calendars 則僅排除週末）。"""
+    cal = _get_nyse_calendar()
+    if cal is None:
+        return _weekday_only_trading_days(start, end)
+    start_str = start.isoformat()
+    end_str = end.isoformat()
+    try:
+        valid = cal.valid_days(start_date=start_str, end_date=end_str)
+    except Exception:
+        return _weekday_only_trading_days(start, end)
+    out = []
+    for ts in valid:
+        try:
+            d = ts.date() if hasattr(ts, "date") else date(ts.year, ts.month, ts.day)
+        except Exception:
+            continue
+        if start <= d <= end:
+            out.append(d)
+    return sorted(set(out))
+
+
+def prev_trading_day(d: date) -> date:
+    """d 的前一個美國市場交易日（考慮假日；若未安裝日曆套件則僅考慮週末）。"""
+    cal = _get_nyse_calendar()
+    if cal is None:
+        return _weekday_only_prev(d)
+    end_str = d.isoformat()
+    start_d = d - timedelta(days=31)
+    start_str = start_d.isoformat()
+    try:
+        valid = cal.valid_days(start_date=start_str, end_date=end_str)
+    except Exception:
+        return _weekday_only_prev(d)
+    prev = None
+    for ts in valid:
+        try:
+            dt = ts.date() if hasattr(ts, "date") else date(ts.year, ts.month, ts.day)
+        except Exception:
+            continue
+        if dt < d:
+            prev = dt
+    if prev is not None:
+        return prev
+    return _weekday_only_prev(d)
 
 
 def load_report_decision(report_dir: str) -> Optional[Dict]:

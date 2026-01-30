@@ -14,7 +14,7 @@ import re
 import csv
 import json
 import requests
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import List, Dict, Optional
 
 import yfinance as yf
@@ -74,12 +74,15 @@ def load_positions(path: str = POSITIONS_CSV) -> List[Dict]:
 def get_current_price(ticker: str, as_of_date=None, backtest_start=None) -> Optional[float]:
     """
     用 Yahoo Finance 取當前價（最近收盤）。
-    as_of_date 有值時為回測；backtest_start 有值時限制數據 range（之前看不到）。
+    as_of_date 有值時為回測，取該日收盤價（yfinance end 為 exclusive，故 end=as_of_date+1）。
+    backtest_start 有值時限制數據 range（之前看不到）。
     """
     try:
         t = yf.Ticker(ticker)
         if as_of_date:
-            end_str = as_of_date.strftime("%Y-%m-%d") if hasattr(as_of_date, "strftime") else str(as_of_date)
+            # yfinance end 為 exclusive，要含 as_of_date 當日收盤須用次日
+            end_date = as_of_date + timedelta(days=1) if hasattr(as_of_date, "strftime") else as_of_date
+            end_str = end_date.strftime("%Y-%m-%d") if hasattr(end_date, "strftime") else str(end_date)
             if backtest_start:
                 start_str = backtest_start.strftime("%Y-%m-%d") if hasattr(backtest_start, "strftime") else str(backtest_start)
                 hist = t.history(start=start_str, end=end_str)

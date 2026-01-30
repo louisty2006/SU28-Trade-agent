@@ -41,7 +41,9 @@
   - 報告目錄：`reports/backtest_range/START_END/YYYY-MM-DD/`（每日一資料夾）  
   - 摘要：`backtest_summary.csv`（每日組合價值、現金、持倉數、報酬率%）  
   - 期末總報酬率、總耗時  
-- **單日回測**（不跑 365 次）：仍可用 `--backtest 2023-06-15`，只跑該日一次。
+- **單日回測**（不跑 365 次）：仍可用 `--backtest 2023-06-15`，只跑該日一次。  
+- **交易日曆**：回測迴圈僅跑美國市場**交易日**（若已安裝 `pandas_market_calendars` 則排除 NYSE 假日；未安裝則僅排除週末）。  
+- **無偷看**：決策用 `as_of_date = 前一交易日(prev_d)`；執行價一律用**當日 d 收盤價**（`get_current_price` 回測時以 end=次日取當日收盤）。
 
 ---
 

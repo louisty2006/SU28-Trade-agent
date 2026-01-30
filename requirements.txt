@@ -16,6 +16,9 @@ python-dotenv>=1.0.0
 # Finnhub API (可選)
 finnhub-python>=2.4.0
 
+# 回測：美國市場交易日曆（排除假日）
+pandas_market_calendars>=4.3.0
+
 # 未來可能需要的 (註解掉，暫不安裝)
 # openai>=1.0.0          # GPT-4
 # anthropic>=0.8.0       # Claude
