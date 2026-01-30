@@ -7,7 +7,7 @@ REISHI (霊視) v4.3 - 整合版 + 回測
 import os
 import sys
 import argparse
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from config import REIKAN_RUN_LOG, REIKAN_STAGE1_CSV, REIKAN_STAGE3_CSV, APP_NAME, APP_NAME_JP, VERSION
 
 
@@ -190,14 +190,17 @@ def run_test():
         _stop_log(log_file, original_stdout)
 
 
-def run_daily_unified(positions_path: str = None, as_of_date: date = None, backtest_start: date = None):
+def run_daily_unified(positions_path: str = None, as_of_date: date = None, backtest_start: date = None, output_base: str = None):
     """
     每日合一 run：Stage 1→2→3（小範圍）＋持倉監控＋今日決策，產出單一報告目錄。
     as_of_date 有值時為回測模式：數據與情境皆截至該日。
     backtest_start 有值時：數據從該日開始（range 之前看不到）。
+    output_base 有值時（僅回測）：報告目錄為 output_base/YYYY-MM-DD/，用於 365 天逐日回測。
     """
     start_time = datetime.now()
-    if as_of_date:
+    if as_of_date and output_base:
+        run_dir = os.path.join(output_base, as_of_date.strftime("%Y-%m-%d"))
+    elif as_of_date:
         run_dir = os.path.join("reports", "backtest", as_of_date.strftime("%Y-%m-%d"))
     else:
         run_dir = os.path.join("reports", "daily", date.today().strftime("%Y-%m-%d"))
@@ -254,6 +257,115 @@ def run_daily_unified(positions_path: str = None, as_of_date: date = None, backt
         print("=" * 70)
     finally:
         _stop_log(log_file, original_stdout)
+
+
+def run_backtest_range(start_dt: date, end_dt: date):
+    """
+    365 天逐日回測：從 start_dt 到 end_dt 每個交易日跑一次完整 pipeline。
+    決策僅用「前一交易日及之前」的數據（無偷看）；執行以當日收盤價模擬。
+    """
+    from backtest_simulator import (
+        get_trading_days,
+        prev_trading_day,
+        load_state,
+        save_state,
+        load_report_decision,
+        apply_decision,
+        portfolio_value,
+    )
+    from daily_monitor import get_current_price
+    from config import BACKTEST_INITIAL_CASH
+
+    base_dir = os.path.join("reports", "backtest_range", f"{start_dt:%Y-%m-%d}_{end_dt:%Y-%m-%d}")
+    base_dir_abs = os.path.abspath(base_dir)
+    state_dir = os.path.join(base_dir_abs, "state")
+    os.makedirs(state_dir, exist_ok=True)
+
+    # 初始狀態：空持倉、初始現金（寫入 state 供第一天讀取）
+    save_state(state_dir, BACKTEST_INITIAL_CASH, [], start_dt - timedelta(days=1) if start_dt else start_dt)
+
+    trading_days = get_trading_days(start_dt, end_dt)
+    if not trading_days:
+        print("❌ 區間內無交易日")
+        return
+
+    start_time = datetime.now()
+    summary_rows = []
+
+    print("\n" + "=" * 70)
+    print("🔮 啟動霊視，洞察市場")
+    print(f"📅 回測 range：{start_dt} ~ {end_dt}，共 {len(trading_days)} 個交易日，逐日跑 pipeline")
+    print("📌 決策僅用「前一交易日及之前」數據；執行以當日收盤價（無偷看未來）")
+    print("=" * 70)
+    print(f"開始時間: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"📁 報告目錄: {base_dir_abs}")
+    print("=" * 70)
+
+    for i, d in enumerate(trading_days):
+        prev_d = prev_trading_day(d)
+        # 決策用數據只到 prev_d；第一天若 prev_d < start_dt 則取 prev_d 前約 90 天
+        backtest_start_eff = (prev_d - timedelta(days=90)) if prev_d < start_dt else start_dt
+
+        cash, positions = load_state(state_dir)
+        state_path = os.path.join(state_dir, "positions.csv")
+        print(f"\n📅 [{i+1}/{len(trading_days)}] 執行日 {d} | 數據截至 {prev_d} | 現金 {cash:.0f} | 持倉 {len(positions)} 檔")
+        run_daily_unified(
+            positions_path=state_path,
+            as_of_date=prev_d,
+            backtest_start=backtest_start_eff,
+            output_base=base_dir_abs,
+        )
+
+        # 報告寫在 base_dir/prev_d（as_of_date=prev_d）
+        run_dir_report = os.path.join(base_dir_abs, prev_d.strftime("%Y-%m-%d"))
+        decision = load_report_decision(run_dir_report)
+        # 執行價一律用「當日 d」收盤價（決策已只用 prev_d 及之前）
+        tickers_needed = {p["ticker"] for p in positions}
+        for e in (decision.get("new_entries") or [])[:3]:
+            t = (e.get("ticker") or "").strip()
+            if t:
+                tickers_needed.add(t)
+        execution_prices_d = {}
+        for ticker in tickers_needed:
+            p = get_current_price(ticker, as_of_date=d, backtest_start=start_dt)
+            if p is not None:
+                execution_prices_d[ticker] = p
+        cash, positions = apply_decision(
+            cash, positions, decision, execution_prices_d, execution_prices_d, d.strftime("%Y-%m-%d"),
+        )
+        save_state(state_dir, cash, positions, d)
+        value = portfolio_value(cash, positions, execution_prices_d)
+        ret_pct = (value - BACKTEST_INITIAL_CASH) / BACKTEST_INITIAL_CASH * 100
+        summary_rows.append({
+            "date": d.strftime("%Y-%m-%d"),
+            "portfolio_value": round(value, 2),
+            "cash": round(cash, 2),
+            "positions_count": len(positions),
+            "return_pct": round(ret_pct, 2),
+        })
+        print(f"   組合價值 {value:.0f} | 報酬 {ret_pct:+.2f}%")
+
+    # 寫入回測摘要
+    import csv as csv_module
+    summary_path = os.path.join(base_dir_abs, "backtest_summary.csv")
+    with open(summary_path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv_module.DictWriter(f, fieldnames=["date", "portfolio_value", "cash", "positions_count", "return_pct"])
+        w.writeheader()
+        w.writerows(summary_rows)
+    final_value = summary_rows[-1]["portfolio_value"] if summary_rows else BACKTEST_INITIAL_CASH
+    final_ret = (final_value - BACKTEST_INITIAL_CASH) / BACKTEST_INITIAL_CASH * 100
+    duration = (datetime.now() - start_time).total_seconds()
+    print("\n" + "=" * 70)
+    print("🎉 回測 range 完成")
+    print("=" * 70)
+    print(f"總交易日: {len(trading_days)}")
+    print(f"初始現金: {BACKTEST_INITIAL_CASH:,.0f}")
+    print(f"期末組合價值: {final_value:,.2f}")
+    print(f"總報酬率: {final_ret:+.2f}%")
+    print(f"總耗時: {duration/60:.1f} 分鐘")
+    print(f"📁 報告與摘要: {base_dir_abs}")
+    print(f"📄 每日價值: {summary_path}")
+    print("=" * 70)
 
 
 def run_test_all():
@@ -401,13 +513,15 @@ def main():
                 return s
             
             try:
+                from backtest_simulator import get_trading_days
                 start_dt = datetime.strptime(_norm_date(start_str), "%Y-%m-%d").date()
                 end_dt = datetime.strptime(_norm_date(end_str), "%Y-%m-%d").date()
                 if start_dt >= end_dt:
                     print("❌ 結束日期必須晚於開始日期")
                     return
-                print(f"\n🔮 啟動霊視回測（{start_dt} ~ {end_dt}），數據範圍限制中...")
-                run_daily_unified(as_of_date=end_dt, backtest_start=start_dt)
+                n_days = len(get_trading_days(start_dt, end_dt))
+                print(f"\n🔮 啟動霊視回測（{start_dt} ~ {end_dt}），共 {n_days} 個交易日，逐日跑 pipeline...")
+                run_backtest_range(start_dt, end_dt)
             except ValueError:
                 print("❌ 日期格式錯誤，請用 YYYY-MM-DD 或 YYYYMMDD，例如 2023-06-15 或 20230101")
             except Exception as e:

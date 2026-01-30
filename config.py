@@ -287,3 +287,11 @@ REIKAN_DAILY_JSON = REIKAN_PREFIX + "daily_report.json"
 APP_NAME = "REISHI"  # 霊視
 APP_NAME_JP = "霊視"
 VERSION = "4.3"
+
+# ---------------------------------------------------------------------------
+# 回測模擬（365 天逐日）
+# ---------------------------------------------------------------------------
+BACKTEST_INITIAL_CASH = 100_000.0       # 初始現金（模擬建倉）
+BACKTEST_PCT_PER_NEW_ENTRY = 0.20      # 每筆新買入動用現金比例（最多 3 筆）
+BACKTEST_ADD_PCT = 0.10                # 加碼時動用現金比例
+BACKTEST_REDUCE_PCT = 0.50              # 減碼時賣出持倉比例
