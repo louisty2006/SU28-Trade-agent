@@ -361,7 +361,7 @@ def run_daily_monitor(
             current, p["buy_price"], p.get("target_price"), p.get("stop_loss")
         )
         if action == "出場":
-            alerts.append(f"{ticker} 建議出場：{reason}")
+            alerts.append(f"{ticker} 建議賣出：{reason}")
         elif action == "減碼":
             alerts.append(f"{ticker} 建議減碼/獲利了結：{reason}")
 
@@ -473,7 +473,9 @@ def _write_report(out_dir: str, report: Dict) -> None:
             lines.append(dec.get("summary", ""))
             lines.append("")
             for p in dec.get("positions", []):
-                lines.append(f"- **{p.get('ticker', '')}** {p.get('action', '')}：{p.get('reason', '')}")
+                action = p.get("action", "")
+                action_display = "賣出" if action == "出場" else action  # 持倉出場→賣出
+                lines.append(f"- **{p.get('ticker', '')}** {action_display}：{p.get('reason', '')}")
             ne = dec.get("new_entries") or []
             if ne:
                 lines.append("")

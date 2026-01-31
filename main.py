@@ -328,16 +328,22 @@ def run_backtest_range(start_dt: date, end_dt: date, quick: bool = False):
         run_dir_report = os.path.join(base_dir_abs, prev_d.strftime("%Y-%m-%d"))
         decision = load_report_decision(run_dir_report)
         # 執行價一律用「當日 d」收盤價（決策已只用 prev_d 及之前）
+        # 若當日無數據，依序嘗試 prev_d、前幾日，避免因數據缺失導致無法執行
         tickers_needed = {p["ticker"] for p in positions}
         for e in (decision.get("new_entries") or [])[:3]:
             t = (e.get("ticker") or "").strip()
             if t:
                 tickers_needed.add(t)
         execution_prices_d = {}
+        fallback_dates = [d, prev_d] + [prev_d - timedelta(days=i) for i in range(1, 6)]
         for ticker in tickers_needed:
-            p = get_current_price(ticker, as_of_date=d, backtest_start=start_dt)
-            if p is not None:
-                execution_prices_d[ticker] = p
+            price = None
+            for try_d in fallback_dates:
+                price = get_current_price(ticker, as_of_date=try_d, backtest_start=start_dt)
+                if price is not None:
+                    break
+            if price is not None:
+                execution_prices_d[ticker] = price
         cash, positions = apply_decision(
             cash, positions, decision, execution_prices_d, execution_prices_d, d.strftime("%Y-%m-%d"),
         )

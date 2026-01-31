@@ -465,12 +465,12 @@ class Stage3Discussion:
             avg_score = sum(data["scores"]) / len(data["scores"]) if data["scores"] else 0
             votes = data["votes"]
             
-            # 決定共識（避開 = 不建議買入，無持倉時不會被誤解為「賣出持倉」）
+            # 決定共識：買入=建議買入 | 觀望=觀望 | 避開=未持倉且不建議買入（非「賣出持倉」）
             if votes["buy"] >= 2:
                 consensus = "買入"
                 passed += 1
             elif votes["sell"] >= 2:
-                consensus = "避開"
+                consensus = "避開"  # 未買入的股票，AI 討論後不買入
                 rejected += 1
             else:
                 consensus = "觀望"
@@ -536,7 +536,7 @@ class Stage3Discussion:
         print(f"{'='*70}")
         
         for i, r in enumerate(self.results[:10], 1):
-            # 買入=建議買入, 觀望=觀望, 避開=不建議（無持倉時不會被誤解為賣出持倉）
+            # 買入=建議買入 | 觀望=觀望 | 避開=不建議買入（已持倉要賣出在 daily_monitor 顯示為「賣出」）
             emoji = "🟢" if r["consensus"] == "買入" else "🟡" if r["consensus"] == "觀望" else "🔴"
             print(f" {i:2}. {r['ticker']:6} | {r['final_score']:5.1f}分 | {emoji} {r['consensus']}")
         
