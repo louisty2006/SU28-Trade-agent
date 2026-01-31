@@ -1,5 +1,5 @@
 """
-REISHI (霊視) v4.3 - 整合版 + 回測
+REISHI Stock Scanner v4.3 - 整合版 + 回測
 一鍵運行 Stage 1 → Stage 2 → Stage 3
 支援 --backtest YYYY-MM-DD：以該日為準取歷史數據，供回測用。
 """

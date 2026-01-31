@@ -284,7 +284,7 @@ REIKAN_DAILY_TXT = REIKAN_PREFIX + "daily_report.txt"
 REIKAN_DAILY_JSON = REIKAN_PREFIX + "daily_report.json"
 
 # 品牌名稱（顯示用）
-APP_NAME = "REISHI"  # 霊視
+APP_NAME = "REISHI Stock Scanner"
 APP_NAME_JP = "霊視"
 VERSION = "4.3"
 
