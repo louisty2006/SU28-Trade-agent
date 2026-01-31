@@ -1,4 +1,6 @@
-# 近期變更整理（多數據源 + 測試階段設定）
+# 近期變更整理（v4.2 → v4.3）
+
+> **完整變更清單**：見 [CHANGELOG_V4.2_TO_V4.3.md](CHANGELOG_V4.2_TO_V4.3.md)
 
 ## 一、多數據源架構（第一性原理）
 
@@ -25,6 +27,13 @@
 | `daily_monitor.py` | 用 `get_close_on_date()` 取當前價 |
 | `utils/data_fetcher.py` | 整合多數據源，股價優先走統一介面 |
 | `backtest_simulator.py` | 註解標示多數據源（執行價仍由 daily_monitor 取） |
+
+### 3. 數據品質強化（v4.3 後續）
+
+- **Yahoo fetch_daily_bars**：多層 fallback（1mo/3mo/6mo）
+- **OHLCV 驗證**：過濾 NaN、負數、異常列
+- **多源合併補洞**：首源不足 min_bars 時他源補齊
+- **get_current_price**：優先 `get_close_verified()` 交叉驗證
 
 ---
 
@@ -98,7 +107,8 @@ stock_scanner/
 ```bash
 python main.py              # 互動選單
 python main.py --daily      # 今日流程
-python main.py --backtest 2023-06-15   # 單日回測
+python main.py --backtest 2025-01-10   # 單日回測
+python main.py --backtest 2025-01-01 2025-01-15 --quick  # 區間回測
 python main.py --test-all   # 小樣本 Stage1→2→3
 ```
 

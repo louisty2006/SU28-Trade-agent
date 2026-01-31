@@ -20,7 +20,7 @@ from typing import List, Dict, Optional
 from dotenv import load_dotenv
 from config import REIKAN_DAILY_TXT, REIKAN_DAILY_JSON
 
-# 多數據源統一介面
+# 多數據源統一介面（優先交叉驗證）
 from utils.data_sources import get_close_on_date, get_close_verified
 
 # 載入 .env（與 stage3 一致，支援主專案目錄）
@@ -76,10 +76,9 @@ def load_positions(path: str = POSITIONS_CSV) -> List[Dict]:
 def get_current_price(ticker: str, as_of_date=None, backtest_start=None) -> Optional[float]:
     """
     使用多數據源取當前價（最近收盤）。
+    優先使用 get_close_verified（至少 2 源交叉驗證），無足夠源時退為 get_close_on_date。
     as_of_date 有值時為回測，取該日收盤價。
     backtest_start 有值時限制數據 range（之前看不到）。
-    
-    數據源優先順序：Yahoo → Stooq → FMP → Twelve Data → ...
     """
     try:
         if as_of_date:
@@ -89,16 +88,21 @@ def get_current_price(ticker: str, as_of_date=None, backtest_start=None) -> Opti
             else:
                 target_date = datetime.strptime(str(as_of_date), "%Y-%m-%d").date()
             
-            # 使用多數據源統一介面
-            close = get_close_on_date(ticker, target_date)
-            return close
+            # 優先交叉驗證（2 源，價差 < 0.5%）
+            close, verified, _ = get_close_verified(ticker, target_date, min_sources=2, max_variance_pct=0.5)
+            if close is not None:
+                return close
+            # 退為單源
+            return get_close_on_date(ticker, target_date)
         else:
             # 即時模式：取今日收盤價
             today = date.today()
+            close, _, _ = get_close_verified(ticker, today, min_sources=2, max_variance_pct=0.5)
+            if close is not None:
+                return close
             close = get_close_on_date(ticker, today)
             if close is not None:
                 return close
-            
             # 若今日無資料（可能還沒收盤或休市），取昨日
             yesterday = today - timedelta(days=1)
             return get_close_on_date(ticker, yesterday)

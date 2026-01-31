@@ -115,21 +115,59 @@ class YahooSource(DataSource):
     requires_key = False
     daily_limit = 999999
     
+    def _to_standard_df(self, hist: pd.DataFrame) -> Optional[pd.DataFrame]:
+        """將 yfinance hist 轉成標準 DataFrame，篩到 [start,end] 範圍。"""
+        if hist is None or hist.empty:
+            return None
+        hist = hist.reset_index()
+        hist = hist.rename(columns={'Date': 'Date', 'Open': 'Open', 'High': 'High',
+                                    'Low': 'Low', 'Close': 'Close', 'Volume': 'Volume'})
+        if 'Date' not in hist.columns:
+            return None
+        hist['Date'] = pd.to_datetime(hist['Date']).dt.date
+        return hist[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']]
+
     def fetch_daily_bars(self, symbol: str, start: date, end: date) -> Optional[pd.DataFrame]:
+        """多層 fallback：start/end → 1mo+end → 3mo → 6mo，確保能拿到數據"""
         try:
             import yfinance as yf
             stock = yf.Ticker(symbol)
-            # yfinance end 是 exclusive，要含 end 當日須用 end+1
             end_inclusive = end + timedelta(days=1)
-            hist = stock.history(start=start.isoformat(), end=end_inclusive.isoformat())
-            if hist is None or hist.empty:
-                return None
-            # 標準化欄位
-            hist = hist.reset_index()
-            hist = hist.rename(columns={'Date': 'Date', 'Open': 'Open', 'High': 'High', 
-                                        'Low': 'Low', 'Close': 'Close', 'Volume': 'Volume'})
-            hist['Date'] = pd.to_datetime(hist['Date']).dt.date
-            return hist[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']]
+            end_str = end_inclusive.isoformat()
+
+            # 方法 1: start/end
+            hist = stock.history(start=start.isoformat(), end=end_str)
+            df = self._to_standard_df(hist)
+            if df is not None and not df.empty:
+                df = df[(df['Date'] >= start) & (df['Date'] <= end)]
+                if len(df) >= 1:
+                    return df
+
+            # 方法 2: period='1mo' + end
+            hist = stock.history(period='1mo', end=end_str)
+            df = self._to_standard_df(hist)
+            if df is not None and not df.empty:
+                df = df[(df['Date'] >= start) & (df['Date'] <= end)]
+                if len(df) >= 1:
+                    return df
+
+            # 方法 3: period='3mo'
+            hist = stock.history(period='3mo')
+            df = self._to_standard_df(hist)
+            if df is not None and not df.empty:
+                df = df[(df['Date'] >= start) & (df['Date'] <= end)]
+                if len(df) >= 1:
+                    return df
+
+            # 方法 4: period='6mo'
+            hist = stock.history(period='6mo')
+            df = self._to_standard_df(hist)
+            if df is not None and not df.empty:
+                df = df[(df['Date'] >= start) & (df['Date'] <= end)]
+                if len(df) >= 1:
+                    return df
+
+            return None
         except Exception:
             return None
     
@@ -650,11 +688,25 @@ class EODHDSource(DataSource):
 # 統一管理器：多數據源 + 交叉驗證
 # =============================================================================
 
+def _validate_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    驗證 OHLCV：移除 NaN、負數、異常列。
+    確保 Open<=High, Low<=Close, Volume>=0, Close>0
+    """
+    if df is None or df.empty:
+        return df
+    df = df.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
+    df = df[df['Close'] > 0]
+    df = df[df['Volume'] >= 0]
+    df = df[(df['Open'] <= df['High']) & (df['Low'] <= df['Close'])]
+    return df
+
+
 class MultiSourceManager:
     """
     多數據源管理器
     - 依序嘗試多個源，直到拿到該日數據
-    - 可交叉驗證（fact check）
+    - 可多源合併補洞、交叉驗證（fact check）
     """
     
     def __init__(self):
@@ -679,27 +731,33 @@ class MultiSourceManager:
         return [s.name for s in self.sources if s.is_available()]
     
     def get_daily_bars(self, symbol: str, start: date, end: date, 
-                       prefer_sources: List[str] = None) -> Optional[pd.DataFrame]:
+                       prefer_sources: List[str] = None,
+                       min_bars: int = 20,
+                       merge_sources: bool = True) -> Optional[pd.DataFrame]:
         """
         取得 [start, end] 內的日線 DataFrame。
-        依序嘗試多個源，直到拿到有效數據。
+        依序嘗試多個源，驗證 OHLCV，不足時可多源合併補洞。
         
         Args:
             symbol: 股票代碼
             start: 起始日期
             end: 結束日期
             prefer_sources: 優先使用的數據源列表（可選）
+            min_bars: 最少需要多少根 K 線（預設 20，用於 SMA）
+            merge_sources: 若首源不足 min_bars，是否嘗試他源合併補洞
         
         Returns:
             DataFrame with columns ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']
             若所有源都沒有，回傳 None
         """
-        # 決定源順序
         sources = self.sources
         if prefer_sources:
             preferred = [s for s in self.sources if s.name in prefer_sources]
             others = [s for s in self.sources if s.name not in prefer_sources]
             sources = preferred + others
+        
+        base_df: Optional[pd.DataFrame] = None
+        base_source_name: Optional[str] = None
         
         for source in sources:
             if not source.is_available():
@@ -707,12 +765,33 @@ class MultiSourceManager:
             try:
                 df = source.fetch_daily_bars(symbol, start, end)
                 if df is not None and not df.empty:
+                    df = _validate_ohlcv(df)
+                    if df.empty:
+                        continue
+                    df = df[(df['Date'] >= start) & (df['Date'] <= end)].sort_values('Date').drop_duplicates('Date')
                     self._call_counts[source.name] = self._call_counts.get(source.name, 0) + 1
-                    return df
-            except Exception as e:
+                    if base_df is None:
+                        base_df = df
+                        base_source_name = source.name
+                        if len(base_df) >= min_bars:
+                            return base_df
+                        if not merge_sources:
+                            return base_df
+                    else:
+                        # 合併補洞：加入 base_df 沒有的日期
+                        existing_dates = set(base_df['Date'].tolist())
+                        extra = df[~df['Date'].isin(existing_dates)]
+                        if not extra.empty:
+                            base_df = pd.concat([base_df, extra], ignore_index=True)
+                            base_df = base_df.sort_values('Date').drop_duplicates('Date')
+                            self._call_counts[source.name] = self._call_counts.get(source.name, 0) + 1
+                        if len(base_df) >= min_bars:
+                            return base_df
+            except Exception:
                 continue
-            time.sleep(0.1)  # 避免太快
-        return None
+            time.sleep(0.1)
+        
+        return base_df
     
     def get_close_on_date(self, symbol: str, d: date,
                           prefer_sources: List[str] = None) -> Optional[float]:
@@ -822,15 +901,17 @@ _manager = MultiSourceManager()
 
 
 def get_daily_bars(symbol: str, start: date, end: date,
-                   prefer_sources: List[str] = None) -> Optional[pd.DataFrame]:
+                   prefer_sources: List[str] = None,
+                   min_bars: int = 20,
+                   merge_sources: bool = True) -> Optional[pd.DataFrame]:
     """
     統一介面：取得 [start, end] 內的日線 DataFrame。
-    依序嘗試多個數據源，直到拿到有效數據。
+    依序嘗試多個數據源，驗證 OHLCV，不足時多源合併補洞。
     
     Example:
         df = get_daily_bars("AAPL", date(2025, 1, 1), date(2025, 1, 10))
     """
-    return _manager.get_daily_bars(symbol, start, end, prefer_sources)
+    return _manager.get_daily_bars(symbol, start, end, prefer_sources, min_bars, merge_sources)
 
 
 def get_close_on_date(symbol: str, d: date,
