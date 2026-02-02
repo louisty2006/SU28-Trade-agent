@@ -142,6 +142,7 @@ class DecisionEngine:
 如果今天不應該有任何操作，也要說明原因。
 
 【輸出格式】（JSON）
+請在「conclusion」欄位中只輸出以下單一 JSON 對象，不要其他文字：
 {{
   "actions": [
     {{
@@ -157,9 +158,9 @@ class DecisionEngine:
       "risks": ["風險1", "風險2"]
     }}
   ],
-  "hold_positions": [...],
+  "hold_positions": [],
   "overall_assessment": "...",
-  "risk_warnings": [...]
+  "risk_warnings": []
 }}
 """
     
@@ -174,16 +175,13 @@ class DecisionEngine:
         self.anti_hallucination = anti_hallucination
         self.output_validator = output_validator
     
-    def decide(self, state: PortfolioState, analyses: AllAnalyses) -> Decision:
+    def decide(
+        self, state: PortfolioState, analyses: AllAnalyses, on_llm_progress=None
+    ) -> Decision:
         """
         做出今日決策
         
-        Args:
-            state: 組合狀態
-            analyses: 所有分析結果
-        
-        Returns:
-            Decision
+        on_llm_progress: 可選 callback(phase, total, message) 回報決策引擎內 3 次 LLM 呼叫進度
         """
         # 1. 準備 prompt
         prompt = self.DECISION_PROMPT.format(
@@ -196,15 +194,25 @@ class DecisionEngine:
         if self.anti_hallucination:
             response = self.anti_hallucination.query_with_self_critique(
                 prompt=prompt,
-                provided_data=analyses.to_dict()
+                provided_data=analyses.to_dict(),
+                on_llm_progress=on_llm_progress,
             )
             decision_data = self._parse_decision_from_response(response.final_analysis.content)
+            if not decision_data.get("actions") and any("格式" in w for w in decision_data.get("risk_warnings", [])):
+                decision_data = self._parse_decision_from_response(
+                    response.final_analysis.raw_response or response.final_analysis.content
+                )
         else:
             # 沒有LLM時，返回保守決策
             decision_data = self._default_conservative_decision(state, analyses)
         
         # 3. 解析決策
         decision = self._build_decision(decision_data)
+        
+        # 若為 LLM 無回應／未配置之保守決策，明確提示
+        assessment = (decision.overall_assessment or "").strip()
+        if "LLM 無回應" in assessment or "LLM未配置" in assessment:
+            print("    ⚠ 決策引擎：LLM 無回應，使用保守決策", flush=True)
         
         # 4. 驗證決策（如果有驗證器）
         if self.output_validator:
@@ -217,21 +225,39 @@ class DecisionEngine:
         return decision
     
     def _parse_decision_from_response(self, response: str) -> Dict:
-        """從LLM响應解析決策"""
+        """從LLM响應解析決策（支援防幻覺格式的 conclusion 或純決策 JSON）"""
         import json
+        import re
         
+        if not response or not response.strip():
+            return self._default_decision_dict("LLM 無回應")
+        raw = response.strip()
         try:
-            # 嘗試解析JSON
-            data = json.loads(response)
-            return data
+            data = json.loads(raw)
+            if isinstance(data, dict) and "actions" in data:
+                return data
+            if isinstance(data, dict) and "conclusion" in data:
+                inner = data["conclusion"]
+                if isinstance(inner, str):
+                    return json.loads(inner)
+                return inner
         except json.JSONDecodeError:
-            # 如果不是JSON，返回默認決策
-            return {
-                "actions": [],
-                "hold_positions": [],
-                "overall_assessment": "無法解析LLM響應",
-                "risk_warnings": ["LLM響應格式錯誤"]
-            }
+            pass
+        match = re.search(r"\{[\s\S]*\"actions\"[\s\S]*\}", raw)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                pass
+        return self._default_decision_dict("無法解析 LLM 決策 JSON")
+    
+    def _default_decision_dict(self, reason: str) -> Dict:
+        return {
+            "actions": [],
+            "hold_positions": [],
+            "overall_assessment": reason,
+            "risk_warnings": ["LLM響應格式錯誤"] if "解析" in reason else []
+        }
     
     def _default_conservative_decision(self, state: PortfolioState, analyses: AllAnalyses) -> Dict:
         """默認保守決策（無LLM時）"""

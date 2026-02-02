@@ -7,12 +7,15 @@ REISHI 霊視 v5.0 - LLM防幻觉机制（第二层防护）
 - 信心度标记
 - 多次调用交叉验证
 - 自我质疑机制
+
+LLM 對接：支援 OpenRouter / Scitely（OpenAI-compatible API）
 """
 
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Any
 import json
 import hashlib
+import os
 
 
 @dataclass
@@ -54,13 +57,14 @@ class AntiHallucination:
     
     def __init__(self, llm_client=None):
         """
-        初始化防幻覺機制
-        
-        Args:
-            llm_client: LLM客户端（DeepSeek等）
+        初始化防幻覺機制。
+        與 v4.3 相同：四 LLM（Scitely, Cohere, Mistral, OpenRouter）。
+        Key 不足時一 LLM 兼多角，框架不變。llm_client 參數保留相容，實際一律用四供應商。
         """
-        self.llm = llm_client
         self._call_history = {}  # 记录调用历史，用于检测重复
+        from core.llm_clients import LLMClients
+        self._llm_clients = LLMClients()
+        self.llm = self._llm_clients.has_any_key()
     
     def query_with_protection(self, 
                               prompt: str, 
@@ -84,7 +88,7 @@ class AntiHallucination:
             system_prompt: 系统提示词（可选）
         
         Returns:
-            ProtectedResponse
+            (ProtectedResponse, used_provider_id or None)
         """
         
         # 构建防幻覺 prompt
@@ -93,15 +97,15 @@ class AntiHallucination:
         # 调用 LLM
         if self.llm is None:
             # 如果没有LLM客户端，返回模拟结果
-            return self._mock_response(prompt, provided_data)
+            return self._mock_response(prompt, provided_data), None
         
         # 实际调用（需要集成真实LLM）
-        raw_response = self._call_llm(protected_prompt, system_prompt)
+        raw_response, used_provider = self._call_llm(protected_prompt, system_prompt)
         
         # 验证响应
         validated_response = self._validate_response(raw_response, provided_data)
         
-        return validated_response
+        return validated_response, used_provider
     
     def _build_protected_prompt(self, prompt: str, provided_data: Dict, require_sources: bool) -> str:
         """构建带防护的 prompt"""
@@ -157,21 +161,29 @@ class AntiHallucination:
             original_prompt=prompt
         )
     
-    def _call_llm(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+    def _call_llm(self, prompt: str, system_prompt: Optional[str] = None) -> tuple:
         """
-        调用 LLM（需要集成真实LLM API）
-        
-        这里需要集成 DeepSeek V3.1 或其他 LLM
+        調用 LLM：與 v4.3 相同四供應商（Scitely, Cohere, Mistral, OpenRouter）。
+        回傳 (response_json_str, used_provider_id or None)。
         """
-        # TODO: 集成真实LLM API
-        # 目前返回占位符
-        return json.dumps({
-            "facts": [],
-            "inferences": [],
-            "uncertainties": [],
-            "conclusion": "LLM响应占位符",
-            "overall_confidence": 0.5
-        }, ensure_ascii=False)
+        if not self._llm_clients or not self._llm_clients.has_any_key():
+            return json.dumps({
+                "facts": [],
+                "inferences": [],
+                "uncertainties": [],
+                "conclusion": "LLM未配置（請設 SCITELY/COHERE/MISTRAL/OPENROUTER 任一 API Key）",
+                "overall_confidence": 0.5
+            }, ensure_ascii=False), None
+        text, used = self._llm_clients.call(prompt, system_prompt, provider_hint=None, timeout=120)
+        if not text:
+            return json.dumps({
+                "facts": [],
+                "inferences": [],
+                "uncertainties": [{"statement": "API 無回應", "reason": "請檢查 Key 與額度"}],
+                "conclusion": "LLM 無回應",
+                "overall_confidence": 0.0
+            }, ensure_ascii=False), None
+        return text, used
     
     def _validate_response(self, response: str, provided_data: Dict) -> ProtectedResponse:
         """
@@ -237,7 +249,17 @@ class AntiHallucination:
             raw_response="模拟响应"
         )
     
-    def query_with_self_critique(self, prompt: str, provided_data: Dict) -> CritiquedResponse:
+    def _provider_display(self, pid: Optional[str]) -> str:
+        """供應商顯示名：如 scitely -> Scitely（基本面）"""
+        if not pid:
+            return "無"
+        from core.llm_clients import CONFIG
+        name = CONFIG.get(pid, {}).get("name", pid)
+        return f"{pid.capitalize()}（{name}）"
+
+    def query_with_self_critique(
+        self, prompt: str, provided_data: Dict, on_llm_progress=None
+    ) -> CritiquedResponse:
         """
         带自我质疑的 LLM 调用
         
@@ -245,12 +267,17 @@ class AntiHallucination:
         1. 分析
         2. 质疑自己的分析
         3. 修正后的最终结论
+        
+        on_llm_progress: 可選 callback(phase, total, message, provider=None) 回報每次 LLM 呼叫與使用供應商
         """
+        if callable(on_llm_progress):
+            on_llm_progress(1, 3, "初次分析", None)
+        initial_analysis, used1 = self.query_with_protection(prompt, provided_data)
+        if callable(on_llm_progress):
+            on_llm_progress(1, 3, "初次分析", self._provider_display(used1))
         
-        # 阶段 1：分析
-        initial_analysis = self.query_with_protection(prompt, provided_data)
-        
-        # 阶段 2：自我质疑
+        if callable(on_llm_progress):
+            on_llm_progress(2, 3, "自我質疑", None)
         critique_prompt = f"""
 你剛才的分析：
 {initial_analysis.content}
@@ -263,9 +290,12 @@ class AntiHallucination:
 
 請誠實、嚴格地審視。
 """
-        critique = self.query_with_protection(critique_prompt, provided_data, require_sources=False)
+        critique, used2 = self.query_with_protection(critique_prompt, provided_data, require_sources=False)
+        if callable(on_llm_progress):
+            on_llm_progress(2, 3, "自我質疑", self._provider_display(used2))
         
-        # 阶段 3：修正
+        if callable(on_llm_progress):
+            on_llm_progress(3, 3, "修正結論", None)
         correction_prompt = f"""
 原始分析：
 {initial_analysis.content}
@@ -276,7 +306,9 @@ class AntiHallucination:
 根據質疑，請修正你的分析和信心度。
 如果質疑發現了問題，降低信心度或修改結論。
 """
-        final_analysis = self.query_with_protection(correction_prompt, provided_data)
+        final_analysis, used3 = self.query_with_protection(correction_prompt, provided_data)
+        if callable(on_llm_progress):
+            on_llm_progress(3, 3, "修正結論", self._provider_display(used3))
         
         # 记录修正内容
         modifications = []
@@ -300,7 +332,7 @@ class AntiHallucination:
         """
         responses = []
         for i in range(n):
-            resp = self.query_with_protection(prompt, provided_data)
+            resp, _ = self.query_with_protection(prompt, provided_data)
             responses.append(resp)
         
         return self._find_consensus(responses)

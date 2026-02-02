@@ -7,20 +7,20 @@
 ## 📖 文档导航
 
 ### 🚀 快速开始
-- **[v4.3 快速开始](guides/quickstart_v4.md)** - v4.3 版本使用指南
-- **[v5.0 快速开始](guides/quickstart_v5.md)** - v5.0 版本使用指南
+- **[V5.0 快速开始](guides/V5.0_QUICKSTART.md)** - v5.0 版本使用指南（本分支以 v5.0 為主）
+- **[v4.3 文件](archive/v4.3/README.md)** - v4.3 專屬文件歸檔（含快速開始、changelog），請切換至 v4.3 分支使用 v4.3 程式
 
 ### 📘 用户指南
-- **[使用说明](guides/USAGE.md)** - 完整使用指南
-- **[API Keys 设置](guides/API_KEYS_GUIDE.md)** - API 密钥配置指南
-- **[回测功能](guides/V5.0_BACKTEST_GUIDE.md)** - v5.0 回测使用说明
-- **[Orchestrator 对接](guides/ORCHESTRATOR_INTEGRATION.md)** - 与 Orchestrator 集成
+- **[V5.0 使用说明](guides/V5.0_USAGE.md)** - 完整使用指南
+- **[V5.0 API Keys](guides/V5.0_API_KEYS_GUIDE.md)** - API 密钥配置指南
+- **[V5.0 回测功能](guides/V5.0_BACKTEST_GUIDE.md)** - v5.0 回测使用说明
+- **[V5.0 Orchestrator 对接](guides/V5.0_ORCHESTRATOR_INTEGRATION.md)** - 与 Orchestrator 集成（接口契約）
+- **[V5.0 回测与 v4.3 注意事项](guides/V5.0_BACKTEST_ORCHESTRATOR_NOTES.md)** - 给回测/Orchestrator 同事：所有更改与注意事项
 
 ### 📝 更新日志
 - **[v5.0.1 更新](changelogs/CHANGELOG_V5.0.1.md)** - 最新版本（回测功能）
 - **[v5.0 更新](changelogs/CHANGELOG_V5.0.md)** - AI 决策系统
-- **[v4.3 更新](changelogs/CHANGELOG_4.3.md)** - 稳定版本
-- **[v4.2 → v4.3](changelogs/CHANGELOG_V4.2_TO_V4.3.md)** - 版本迁移
+- **[v4.3 更新 / v4.2→v4.3](archive/v4.3/)** - v4.3 專屬 changelog 已歸檔於此
 
 ### 🛠️ 开发文档
 - **[项目概要](development/PROJECT_SUMMARY.md)** - 项目架构和设计
@@ -30,6 +30,7 @@
 
 ### 📦 归档
 - **[archive/](archive/)** - 历史文档和临时总结
+- **[archive/v4.3/](archive/v4.3/)** - v4.3 專屬文件（changelog、快速開始、plan 回測說明）；v4.3 程式請用 v4.3 分支
 
 ---
 
@@ -52,8 +53,8 @@ docs/
 - [v5.0 README](../V5.0_README.md) - v5.0 专用文档
 
 ### 配置文件
-- [config.json.example](../config.json.example) - Orchestrator 配置示例
-- [config.yaml.example](../config.yaml.example) - v5.0 配置示例
+- [V5.0_config.json.example](../V5.0_config.json.example) - 回测/Orchestrator 配置示例（使用時複製為 `config.json`）
+- [V5.0_config.yaml.example](../V5.0_config.yaml.example) - v5.0 每日分析配置示例（使用時複製為 `config.yaml`）
 - [.env.example](../.env.example) - 环境变量示例
 
 ---

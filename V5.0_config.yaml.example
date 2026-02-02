@@ -1,4 +1,5 @@
-# REISHI 霊視 v5.0 MVP - 配置文件
+# REISHI 霊視 v5.0 MVP - 配置文件範例
+# 使用時請複製為 config.yaml：cp V5.0_config.yaml.example config.yaml
 
 # 应用信息
 app:
@@ -83,6 +84,7 @@ report:
 # MVP限制
 mvp:
   max_scan_stocks: 50  # 最大扫描股票数
+  scan_tickers: ["AAPL", "GOOGL", "MSFT", "TSLA", "NVDA"]  # 小樣本掃描列表（可覆蓋 V5_SCAN_TICKERS）
   enable_llm_verification: false  # 是否启用LLM图表验证
   enable_web_search: false  # 是否启用网络搜索
   cost_target_monthly: 10  # 月度成本目标（USD）

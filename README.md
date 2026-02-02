@@ -14,8 +14,9 @@ cp .env.example .env                      # 填入 API Key（見下方）
 # 每日分析
 python main_v5.py --daily
 
-# 回測（Orchestrator 對接）
-python main_v5.py --backtest 2025-01-01 2025-01-31
+# 回測（v5.0 逐日流程，Orchestrator 對接）
+python main_v5.py --backtest 2025-01-01 2025-01-31        # 大回測（逐日 v5.0 八步流程）
+python main_v5.py --backtest 2025-01-01 2025-01-31 --quick # 小回測（每日約 5 檔，加快）
 
 # 即時監控 / 統計
 python main_v5.py --monitor
@@ -46,7 +47,7 @@ v5.0 每日分析與回測會用到以下 Key；**回測模式**僅需 `config.j
   範例配置：複製 `V5.0_config.json.example` 為 `config.json`，或由 Orchestrator 寫入 `config.json`。
 - **初始資金**：預設 40,000 HKD，可由 `config.json` 的 `backtest_initial_cash` 覆寫。
 - **評分與成本**：Sortino、MDD、交易成本等由 **Orchestrator** 計算；v5.0 只產出原始 CSV。
-- 若需「完整 pipeline 逐日回測」（Stage 1→2→3 + 持倉監控），請使用 **v4.3 分支**；v5.0 回測為獨立簡化模組，產出格式與 v4.3 相同。
+- **v5.0 大回測／小回測**：`python main_v5.py --backtest START END`（逐日跑 v5.0 八步流程）、`--quick` 為小回測（每日約 5 檔）；產出 `backtest_summary.csv`、`backtest_trades.csv` 與 v4.3 格式相同。
 
 詳見：**[docs/guides/V5.0_BACKTEST_ORCHESTRATOR_NOTES.md](docs/guides/V5.0_BACKTEST_ORCHESTRATOR_NOTES.md)**、**[docs/guides/V5.0_ORCHESTRATOR_INTEGRATION.md](docs/guides/V5.0_ORCHESTRATOR_INTEGRATION.md)**。
 

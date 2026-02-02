@@ -1,6 +1,6 @@
 {
-  "_comment": "REISHI v5.0 - Orchestrator 对接配置示例",
-  "_usage": "Orchestrator 动态生成此文件，Scanner 自动读取",
+  "_comment": "REISHI v5.0 - Orchestrator 对接配置示例（本檔為範例，檔名 V5.0_config.json.example）",
+  "_usage": "使用時請複製為 config.json，或由 Orchestrator 寫入 config.json；回測時 BacktestEngine 會讀取 config.json",
   
   "stage1_weights": {
     "rsi": 0.20,
