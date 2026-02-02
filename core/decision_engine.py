@@ -142,7 +142,7 @@ class DecisionEngine:
 如果今天不應該有任何操作，也要說明原因。
 
 【輸出格式】（JSON）
-請在「conclusion」欄位中只輸出以下單一 JSON 對象，不要其他文字：
+在「conclusion」欄位中，必須輸出一個 JSON 對象（不是字符串），格式如下：
 {{
   "actions": [
     {{
@@ -162,6 +162,8 @@ class DecisionEngine:
   "overall_assessment": "...",
   "risk_warnings": []
 }}
+
+注意：conclusion 必須是 JSON 對象，不是字符串。如果無操作，也要輸出 {{"actions": [], "overall_assessment": "原因..."}}
 """
     
     def __init__(self, anti_hallucination=None, output_validator=None):
@@ -197,6 +199,16 @@ class DecisionEngine:
                 provided_data=analyses.to_dict(),
                 on_llm_progress=on_llm_progress,
             )
+            # #region agent log
+            try:
+                import json, time
+                _full_content = response.final_analysis.content or ""
+                _content = _full_content[:500] if len(_full_content) > 500 else _full_content
+                with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                    _dbg.write(json.dumps({"hypothesisId": "H6", "message": "llm_response_before_parse", "data": {"content_len": len(_full_content), "content_preview": _content, "full_content": _full_content}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            # #endregion
             decision_data = self._parse_decision_from_response(response.final_analysis.content)
             if not decision_data.get("actions") and any("格式" in w for w in decision_data.get("risk_warnings", [])):
                 decision_data = self._parse_decision_from_response(
@@ -207,6 +219,15 @@ class DecisionEngine:
             decision_data = self._default_conservative_decision(state, analyses)
         
         # 3. 解析決策
+        # #region agent log
+        try:
+            import json, time
+            _n_actions = len(decision_data.get("actions", []))
+            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                _dbg.write(json.dumps({"hypothesisId": "H5", "message": "decision_data_after_parse", "data": {"n_actions": _n_actions, "overall_assessment": (decision_data.get("overall_assessment") or "")[:100]}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
         decision = self._build_decision(decision_data)
         
         # 若為 LLM 無回應／未配置之保守決策，明確提示
@@ -232,22 +253,95 @@ class DecisionEngine:
         if not response or not response.strip():
             return self._default_decision_dict("LLM 無回應")
         raw = response.strip()
+        
+        # #region agent log
+        try:
+            _raw_before = raw[:300]
+            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                _dbg.write(json.dumps({"hypothesisId": "H6", "message": "parse_input", "data": {"raw_len": len(raw), "raw_preview": _raw_before}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        
+        # 1) Strip markdown code blocks (```json ... ``` or ``` ... ```)
+        # More flexible pattern: handles both \n``` and ``` (without newline)
+        raw = re.sub(r"```(?:json)?\s*([\s\S]*?)```", r"\1", raw, flags=re.IGNORECASE)
+        raw = raw.strip()
+        
+        # #region agent log
+        try:
+            _raw_after = raw[:300]
+            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                _dbg.write(json.dumps({"hypothesisId": "H6", "message": "parse_after_strip", "data": {"raw_len": len(raw), "raw_preview": _raw_after}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        
         try:
             data = json.loads(raw)
+            # #region agent log
+            try:
+                _has_actions = "actions" in data if isinstance(data, dict) else False
+                _has_conclusion = "conclusion" in data if isinstance(data, dict) else False
+                with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                    _dbg.write(json.dumps({"hypothesisId": "H6", "message": "json_loads_success", "data": {"is_dict": isinstance(data, dict), "has_actions": _has_actions, "has_conclusion": _has_conclusion, "keys": list(data.keys()) if isinstance(data, dict) else None}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            # #endregion
             if isinstance(data, dict) and "actions" in data:
                 return data
             if isinstance(data, dict) and "conclusion" in data:
                 inner = data["conclusion"]
-                if isinstance(inner, str):
-                    return json.loads(inner)
+                if isinstance(inner, dict) and "actions" in inner:
+                    # conclusion is already a decision object
+                    return inner
+                elif isinstance(inner, str):
+                    # conclusion is a string, try to parse it
+                    inner_stripped = inner.strip()
+                    if inner_stripped.startswith("{") or "actions" in inner_stripped.lower():
+                        try:
+                            return json.loads(inner_stripped)
+                        except json.JSONDecodeError:
+                            pass
+                    # conclusion is plain text (e.g., "今日無合適標的")
+                    # Return valid decision with assessment as the conclusion text
+                    return {
+                        "actions": [],
+                        "hold_positions": [],
+                        "overall_assessment": inner_stripped,
+                        "risk_warnings": []
+                    }
+                # conclusion is some other type
                 return inner
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            # #region agent log
+            try:
+                with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                    _dbg.write(json.dumps({"hypothesisId": "H6", "message": "json_loads_failed", "data": {"error": str(e), "raw_start": raw[:200]}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            # #endregion
             pass
         match = re.search(r"\{[\s\S]*\"actions\"[\s\S]*\}", raw)
         if match:
             try:
-                return json.loads(match.group(0))
-            except json.JSONDecodeError:
+                _matched = match.group(0)
+                # #region agent log
+                try:
+                    with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                        _dbg.write(json.dumps({"hypothesisId": "H6", "message": "regex_match_attempt", "data": {"matched_len": len(_matched), "matched_preview": _matched[:200]}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+                # #endregion
+                return json.loads(_matched)
+            except json.JSONDecodeError as e:
+                # #region agent log
+                try:
+                    with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                        _dbg.write(json.dumps({"hypothesisId": "H6", "message": "regex_match_parse_failed", "data": {"error": str(e)}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+                # #endregion
                 pass
         return self._default_decision_dict("無法解析 LLM 決策 JSON")
     

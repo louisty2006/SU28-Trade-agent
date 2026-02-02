@@ -131,54 +131,54 @@ class ReishiV5:
                     news_desc = "0 筆（該區間無資料）" if (FINNHUB_API_KEY or os.getenv("FINNHUB_API_KEY")) else "0 筆（未設定 FINNHUB_API_KEY）"
                 except Exception:
                     news_desc = "0 筆（未設定 FINNHUB_API_KEY）"
-            # 輸入層：你的狀態 → 市場數據 → 即時新聞 → 霊視記憶
+            # 輸入層：你的狀態 → 市場數據 → 即時新聞 → 霊視記憶（標明數據源）
             your_state = f"現金 {self.portfolio.cash:,.0f}、持倉 {len(self.portfolio.positions)} 檔、總值 {self.portfolio.total_value:,.0f}"
-            market_data_desc = f"掃描標的 {len(tickers_to_fetch)} 檔（{', '.join(tickers_to_fetch[:8])}{' ...' if len(tickers_to_fetch) > 8 else ''}）"
+            market_data_desc = f"掃描標的 {len(tickers_to_fetch)} 檔（{', '.join(tickers_to_fetch[:8])}{' ...' if len(tickers_to_fetch) > 8 else ''}）；數據源：Yahoo (DataFetcher) / yfinance"
             try:
                 mem_stats = self.memory.get_statistics()
                 memory_desc = f"已載入，歷史建議 {mem_stats.get('total_recommendations', 0)} 筆、已執行 {mem_stats.get('executed', 0)}、已完成 {mem_stats.get('completed', 0)}"
             except Exception:
                 memory_desc = "已載入"
             flow_logger.log_input_layer(your_state, market_data_desc, news_desc, memory_desc, as_of_date="", mode="每日分析")
-            # 1. 获取并验证数据 — 第一層防護：數據驗證
+            # 1. 获取并验证数据 — 第一層防護：數據驗證（先標明步驟與數據源，再拉取）
             print("\n[1/8] 数据获取与验证...")
+            flow_logger.log_layer1_start("Yahoo (DataFetcher) / yfinance（依環境）")
             market_data, data_source = self._fetch_and_validate_data(on_ticker=lambda t, i, n: flow_logger.log_layer1_fetch(t, i, n))
-            flow_logger.log_layer1_start(data_source)
             tickers = list(market_data.keys()) or tickers_to_fetch
             flow_logger.log_layer1_result(len(market_data), tickers, data_source=data_source)
             if not market_data:
                 print("   ⚠ 無市場數據，分析將僅有架構輸出")
             # 五大 AI 方向分析層
             flow_logger.log_ai_layer_start()
-            # 2. 图表型态识别
+            # 2. 图表型态识别（數據源：第一層驗證後的 K 線）
             print("\n[2/8] 图表型态识别...")
-            flow_logger.log_ai_2_start(len(tickers))
+            flow_logger.log_ai_2_start(len(tickers), data_sources="第一層驗證後的 K 線（步驟 1 的 Yahoo/DataFetcher）")
             pattern_analysis = self.pattern_recognition.scan_all(tickers, market_data, on_ticker=lambda t, i, n: flow_logger.log_ai_2_fetch(t, i, n))
             flow_logger.log_ai_2_result(len(pattern_analysis), [getattr(c, "ticker", "") for c in pattern_analysis] if pattern_analysis else None)
-            # 3. 因果推理（傳入即時新聞）
+            # 3. 因果推理（數據源：即時新聞 Finnhub、持倉本地）
             print("\n[3/8] 因果推理...")
-            flow_logger.log_ai_3_start()
+            flow_logger.log_ai_3_start(data_sources="即時新聞（Finnhub）、持倉（本地）；LLM 因果鏈（四角）")
             causal_analysis = self.causal_reasoning.analyze_all(news=all_news_for_causal, portfolio=self.portfolio.positions)
             flow_logger.log_ai_3_result()
-            # 4. 情绪分析（傳入即時新聞 by ticker）
+            # 4. 情绪分析（數據源：即時新聞 Finnhub、標的列表）
             print("\n[4/8] 情绪分析...")
-            flow_logger.log_ai_4_start(len(tickers))
+            flow_logger.log_ai_4_start(len(tickers), data_sources="即時新聞（Finnhub）、標的列表；LLM 情緒分析（四角）")
             sentiment_analysis = self.sentiment_analyzer.analyze_batch(tickers, on_ticker=lambda t, i, n: flow_logger.log_ai_4_fetch(t, i, n), news_by_ticker=news_by_ticker_for_sentiment)
             flow_logger.log_ai_4_result()
-            # 5. Multi-Agent 分析
+            # 5. Multi-Agent 分析（數據源：圖表候選 + 市場數據；LLM 四角）
             print("\n[5/8] Multi-Agent 协作分析...")
-            flow_logger.log_ai_5_start(len(pattern_analysis))
+            flow_logger.log_ai_5_start(len(pattern_analysis), data_sources="圖表候選（步驟 2）、市場數據（步驟 1）；LLM 四角（Scitely/Cohere/Mistral/OpenRouter）")
             multi_agent_analysis = self.multi_agent.analyze_all(candidates=pattern_analysis, data=market_data)
             flow_logger.log_ai_5_result()
-            # 6. 霊視记忆参考
+            # 6. 霊視记忆参考（數據源：霊視記憶 DB、圖表候選）
             print("\n[6/8] 霊視记忆参考...")
-            flow_logger.log_ai_6_start()
+            flow_logger.log_ai_6_start(data_sources="霊視記憶 DB（本地）、圖表候選（步驟 2）；LLM 摘要/洞察（四角）")
             memory_insights = self.memory.get_insights_for_candidates(pattern_analysis)
             n_insights = len(memory_insights.get("insights", [])) if isinstance(memory_insights, dict) else 0
             flow_logger.log_ai_6_result(n_insights)
-            # 7. 决策引擎 — 第二層防護：LLM 防幻覺
+            # 7. 决策引擎 — 第二層防護：LLM 防幻覺（數據源：防幻覺模組 + 步驟 1～6 結果）
             print("\n[7/8] 决策引擎...")
-            flow_logger.log_layer2_start()
+            flow_logger.log_layer2_start(data_sources="防幻覺模組（Scitely/Cohere/Mistral/OpenRouter）、步驟 1～6 分析結果")
             all_analyses = AllAnalyses(
                 pattern=pattern_analysis,
                 causal=causal_analysis,
@@ -252,6 +252,15 @@ class ReishiV5:
             if callable(on_step_activity):
                 on_step_activity(step_i, msg)
         def _on_ticker_wrap(t, i, n):
+            # #region agent log
+            if i == 1:
+                try:
+                    import json
+                    with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                        _dbg.write(json.dumps({"hypothesisId": "H2", "message": "on_ticker_wrap_first", "data": {"ticker": str(t), "has_flow_logger": flow_logger is not None, "has_on_ticker": callable(on_ticker)}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+            # #endregion
             if flow_logger:
                 flow_logger.log_layer1_fetch(t, i, n)
             if callable(on_ticker):
@@ -282,9 +291,9 @@ class ReishiV5:
             except Exception:
                 news_desc = "0 筆（未設定 FINNHUB_API_KEY）"
         if flow_logger:
-            # 輸入層：你的狀態 → 市場數據 → 即時新聞 → 霊視記憶
+            # 輸入層：你的狀態 → 市場數據 → 即時新聞 → 霊視記憶（標明數據源）
             your_state = f"現金 {self.portfolio.cash:,.0f}、持倉 {len(self.portfolio.positions)} 檔、總值 {self.portfolio.total_value:,.0f}"
-            market_data_desc = f"掃描標的 {len(tickers_to_fetch)} 檔（{', '.join(tickers_to_fetch[:8])}{' ...' if len(tickers_to_fetch) > 8 else ''}）"
+            market_data_desc = f"掃描標的 {len(tickers_to_fetch)} 檔（{', '.join(tickers_to_fetch[:8])}{' ...' if len(tickers_to_fetch) > 8 else ''}）；數據源：Yahoo (DataFetcher) / yfinance"
             try:
                 mem_stats = self.memory.get_statistics()
                 memory_desc = f"已載入，歷史建議 {mem_stats.get('total_recommendations', 0)} 筆、已執行 {mem_stats.get('executed', 0)}、已完成 {mem_stats.get('completed', 0)}"
@@ -293,12 +302,37 @@ class ReishiV5:
             flow_logger.log_input_layer(your_state, market_data_desc, news_desc, memory_desc, as_of_date=end_str, mode="回測（數據截至當日）")
         if not silent:
             print(f"   [回測日] 數據截至 {end_str}")
-        # 細項 1：取數 — 第一層防護：數據驗證
+        # 細項 1：取數 — 第一層防護：數據驗證（先標明步驟與數據源，再拉取）
         _prog(1, "取數", 0)
         _activity(1, "開始從數據源拉取歷史 K 線…")
-        market_data, data_source = self._fetch_and_validate_data(end_date=as_of_date, start_date=start_d, quick=quick, full_universe=full_universe, silent=silent, on_ticker=_on_ticker_wrap)
+        # #region agent log
+        try:
+            import json
+            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                _dbg.write(json.dumps({"hypothesisId": "H1", "message": "before_log_layer1_start", "data": {"end_str": str(end_str)}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
         if flow_logger:
-            flow_logger.log_layer1_start(data_source)
+            flow_logger.log_layer1_start("Yahoo (DataFetcher) / yfinance（依環境）")
+        market_data, data_source = self._fetch_and_validate_data(end_date=as_of_date, start_date=start_d, quick=quick, full_universe=full_universe, silent=silent, on_ticker=_on_ticker_wrap)
+        # #region agent log
+        try:
+            import json
+            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                _dbg.write(json.dumps({"hypothesisId": "H1", "message": "after_fetch_before_layer1_result", "data": {"n_market": len(market_data)}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        # #region agent log
+        try:
+            import json
+            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                _dbg.write(json.dumps({"hypothesisId": "H4", "message": "market_data_result", "data": {"n_valid": len(market_data), "valid_tickers": list(market_data.keys())[:5], "requested": len(tickers_to_fetch)}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        if flow_logger:
             flow_logger.log_layer1_result(len(market_data), list(market_data.keys()), data_source=data_source)
         _activity(1, f"取數完成，共 {len(market_data)} 檔有效數據")
         _prog(1, "取數", 100)
@@ -308,26 +342,36 @@ class ReishiV5:
         # 五大 AI 方向分析層
         if flow_logger:
             flow_logger.log_ai_layer_start()
-        # 細項 2：圖表型態識別
+        # 細項 2：圖表型態識別（數據源：第一層驗證後的 K 線）
         _prog(2, "圖形掃描", 0)
         _activity(2, f"開始掃描 {len(tickers)} 檔圖表型態（突破、VCP 等）…")
         if flow_logger:
-            flow_logger.log_ai_2_start(len(tickers))
+            flow_logger.log_ai_2_start(len(tickers), data_sources="第一層驗證後的 K 線（步驟 1 的 Yahoo/DataFetcher）")
         pattern_analysis = self.pattern_recognition.scan_all(
             tickers, market_data,
             on_ticker=lambda t, i, n: (flow_logger.log_ai_2_fetch(t, i, n) if flow_logger else None, _activity(2, f"正在掃描 {t} ({i}/{n}) …") if callable(on_step_activity) else None)
         )
+        # #region agent log
+        try:
+            import json
+            _n_pattern = len(pattern_analysis) if pattern_analysis else 0
+            _pattern_tickers = [getattr(c, "ticker", "") for c in (pattern_analysis or [])][:5]
+            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                _dbg.write(json.dumps({"hypothesisId": "H5", "message": "pattern_analysis_result", "data": {"n_candidates": _n_pattern, "candidate_tickers": _pattern_tickers}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
         if flow_logger:
             flow_logger.log_ai_2_result(len(pattern_analysis), [getattr(c, "ticker", "") for c in pattern_analysis] if pattern_analysis else None)
         _activity(2, f"圖形掃描完成，候選數 {len(pattern_analysis)}")
         _prog(2, "圖形掃描", 100)
         if report_dir:
             write_step_report(report_dir, 2, flow_steps[1], short_names[1])
-        # 細項 3：因果推理（傳入即時新聞）
+        # 細項 3：因果推理（數據源：Finnhub 新聞、持倉）
         _prog(3, "因果分析", 0)
         _activity(3, "因果推理：分析新聞影響與持倉風險…")
         if flow_logger:
-            flow_logger.log_ai_3_start()
+            flow_logger.log_ai_3_start(data_sources="即時新聞（Finnhub）、持倉（本地）；LLM 因果鏈（四角）")
         causal_analysis = self.causal_reasoning.analyze_all(news=all_news_for_causal, portfolio=self.portfolio.positions)
         if flow_logger:
             flow_logger.log_ai_3_result()
@@ -335,11 +379,11 @@ class ReishiV5:
         _prog(3, "因果分析", 100)
         if report_dir:
             write_step_report(report_dir, 3, flow_steps[2], short_names[2])
-        # 細項 4：情緒分析（傳入即時新聞 by ticker）
+        # 細項 4：情緒分析（數據源：Finnhub 新聞、標的）
         _prog(4, "情緒分析", 0)
         _activity(4, f"開始對 {len(tickers)} 檔做情緒分析…")
         if flow_logger:
-            flow_logger.log_ai_4_start(len(tickers))
+            flow_logger.log_ai_4_start(len(tickers), data_sources="即時新聞（Finnhub）、標的列表；LLM 情緒分析（四角）")
         sentiment_analysis = self.sentiment_analyzer.analyze_batch(
             tickers,
             on_ticker=lambda t, i, n: (flow_logger.log_ai_4_fetch(t, i, n) if flow_logger else None, _activity(4, f"正在分析 {t} ({i}/{n}) …") if callable(on_step_activity) else None),
@@ -351,11 +395,11 @@ class ReishiV5:
         _prog(4, "情緒分析", 100)
         if report_dir:
             write_step_report(report_dir, 4, flow_steps[3], short_names[3])
-        # 細項 5：Multi-Agent 協作分析
+        # 細項 5：Multi-Agent 協作分析（數據源：圖表候選 + 市場數據；LLM 四角）
         _prog(5, "多智能體", 0)
         _activity(5, "多智能體：彙總候選與市場數據、產出共識…")
         if flow_logger:
-            flow_logger.log_ai_5_start(len(pattern_analysis))
+            flow_logger.log_ai_5_start(len(pattern_analysis), data_sources="圖表候選（步驟 2）、市場數據（步驟 1）；LLM 四角（Scitely/Cohere/Mistral/OpenRouter）")
         multi_agent_analysis = self.multi_agent.analyze_all(candidates=pattern_analysis, data=market_data)
         if flow_logger:
             flow_logger.log_ai_5_result()
@@ -363,11 +407,11 @@ class ReishiV5:
         _prog(5, "多智能體", 100)
         if report_dir:
             write_step_report(report_dir, 5, flow_steps[4], short_names[4])
-        # 細項 6：霊視記憶參考
+        # 細項 6：霊視記憶參考（數據源：霊視記憶 DB、圖表候選）
         _prog(6, "記憶洞察", 0)
         _activity(6, "霊視記憶：查詢歷史案例、提取洞察…")
         if flow_logger:
-            flow_logger.log_ai_6_start()
+            flow_logger.log_ai_6_start(data_sources="霊視記憶 DB（本地）、圖表候選（步驟 2）；LLM 摘要/洞察（四角）")
         memory_insights = self.memory.get_insights_for_candidates(pattern_analysis)
         if flow_logger:
             n_insights = len(memory_insights.get("insights", [])) if isinstance(memory_insights, dict) else 0
@@ -383,11 +427,11 @@ class ReishiV5:
             multi_agent=multi_agent_analysis,
             memory=memory_insights,
         )
-        # 細項 7：決策引擎 — 第二層防護：LLM 防幻覺
+        # 細項 7：決策引擎 — 第二層防護：LLM 防幻覺（數據源：防幻覺模組 + 步驟 1～6）
         _prog(7, "決策引擎（LLM 決策中…）", 0)
         _activity(7, "決策引擎：組裝 prompt、呼叫 LLM（防幻覺 + 自我質疑）…")
         if flow_logger:
-            flow_logger.log_layer2_start()
+            flow_logger.log_layer2_start(data_sources="防幻覺模組（Scitely/Cohere/Mistral/OpenRouter）、步驟 1～6 分析結果")
         decision = self.decision_engine.decide(
             state=self.portfolio, analyses=all_analyses, on_llm_progress=_on_llm_wrap
         )
@@ -444,6 +488,31 @@ class ReishiV5:
             env_tickers = os.getenv("V5_SCAN_TICKERS", "AAPL,GOOGL,MSFT,TSLA,NVDA")
             tickers = [t.strip() for t in env_tickers.split(",") if t.strip()]
         cap = 20 if quick else 50
+        # 小回測（quick=True）時若來源少於 20 檔，從美股池或預設名單補足到 20 檔
+        if quick and len(tickers) < 20:
+            _seen = set(t.upper() for t in tickers)
+            _base = os.path.dirname(os.path.abspath(__file__))
+            us_path = os.path.join(_base, "data", "us_universe.csv")
+            if os.path.isfile(us_path):
+                try:
+                    import csv
+                    with open(us_path, "r", encoding="utf-8") as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            sym = (row.get("symbol") or row.get("Symbol") or "").strip()
+                            if sym and sym.upper() not in _seen and len(tickers) < 20:
+                                tickers.append(sym)
+                                _seen.add(sym.upper())
+                except Exception:
+                    pass
+            # fallback：仍不足 20 則用預設流動性名單補足
+            _default_20 = ("AAPL", "GOOGL", "MSFT", "AMZN", "NVDA", "META", "TSLA", "BRK.B", "JPM", "V", "JNJ", "WMT", "PG", "UNH", "HD", "DIS", "BAC", "ADBE", "XOM", "NFLX")
+            for sym in _default_20:
+                if len(tickers) >= 20:
+                    break
+                if sym.upper() not in _seen:
+                    tickers.append(sym)
+                    _seen.add(sym.upper())
         return tickers[:cap]
 
     def _fetch_and_validate_data(self, end_date=None, start_date=None, quick: bool = False, full_universe: bool = False, silent: bool = False, on_ticker=None):
@@ -453,6 +522,14 @@ class ReishiV5:
         data_source = "yfinance"
         end_str = end_date.strftime("%Y-%m-%d") if hasattr(end_date, "strftime") else end_date
         start_str = start_date.strftime("%Y-%m-%d") if start_date and hasattr(start_date, "strftime") else start_date
+        # #region agent log
+        try:
+            import json
+            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                _dbg.write(json.dumps({"hypothesisId": "H4", "message": "fetch_params", "data": {"end_str": end_str, "start_str": start_str, "n_tickers": len(tickers), "tickers_sample": tickers[:3]}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
         n_tickers = len(tickers)
         try:
             from utils.data_fetcher import DataFetcher
@@ -463,6 +540,17 @@ class ReishiV5:
                     on_ticker(ticker, idx + 1, n_tickers)
                 try:
                     df = fetcher.get_yahoo_history(ticker, period="90d", end_date=end_str, start_date=start_str)
+                    # #region agent log
+                    if idx == 0:
+                        try:
+                            import json
+                            _df_len = len(df) if df is not None and not df.empty else 0
+                            _df_is_none = df is None
+                            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                                _dbg.write(json.dumps({"hypothesisId": "H4", "message": "first_ticker_fetch_result", "data": {"ticker": ticker, "df_is_none": _df_is_none, "df_len": _df_len, "end_str": end_str, "start_str": start_str}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+                        except Exception:
+                            pass
+                    # #endregion
                     if df is not None and not df.empty and len(df) >= 20:
                         market_data[ticker] = df
                         if not silent:
@@ -569,7 +657,17 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, quick: bool = Fal
             print(f"   [{i+1}/{len(trading_days)}] 正在處理 {T} …", flush=True)
             day_start = time.time()
             prev_d = prev_trading_day(T)
-            backtest_start_eff = (prev_d - timedelta(days=90)) if prev_d < start_d else start_d
+            # Always use 90-day lookback window from prev_d (never collapse to start_d)
+            backtest_start_eff = prev_d - timedelta(days=90)
+            # #region agent log
+            if i == 0:
+                try:
+                    import json
+                    with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                        _dbg.write(json.dumps({"hypothesisId": "H4", "message": "first_day_dates", "data": {"T": T.strftime("%Y-%m-%d"), "prev_d": prev_d.strftime("%Y-%m-%d"), "backtest_start_eff": backtest_start_eff.strftime("%Y-%m-%d") if hasattr(backtest_start_eff, "strftime") else str(backtest_start_eff)}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+            # #endregion
             reishi.portfolio = PortfolioState(
                 cash=cash,
                 positions=positions,
@@ -605,10 +703,12 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, quick: bool = Fal
                 else:
                     print(f"    決策引擎 LLM 第 {phase}/{total} 次（{message}）…", flush=True)
             try:
+                # When flow_logger is set, omit per-ticker/step callbacks to avoid duplicate lines (FlowLogger already prints ├ 正在取得/掃描/分析)
                 decision, all_analyses = reishi.run_daily_for_backtest(
                     prev_d, backtest_start_eff, quick=quick, full_universe=full_universe, silent=True,
-                    on_progress=_on_progress, on_llm_progress=_on_llm_progress, on_ticker=_on_ticker,
-                    on_step_activity=_on_step_activity,
+                    on_progress=_on_progress, on_llm_progress=_on_llm_progress,
+                    on_ticker=None if flow_logger else _on_ticker,
+                    on_step_activity=None if flow_logger else _on_step_activity,
                     flow_logger=flow_logger,
                     report_dir=daily_report_dir,
                 )
@@ -623,6 +723,16 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, quick: bool = Fal
                     if t:
                         tickers_needed.append(t)
             execution_prices = get_execution_prices_for_date(tickers_needed or ["AAPL"], T)
+            # #region agent log
+            try:
+                import json
+                _n_exec = len(execution_prices)
+                _exec_sample = list(execution_prices.items())[:3]
+                with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                    _dbg.write(json.dumps({"hypothesisId": "H7", "message": "execution_prices_fetched", "data": {"date": T.strftime("%Y-%m-%d"), "n_prices": _n_exec, "tickers_needed": tickers_needed[:5], "exec_sample": _exec_sample}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            # #endregion
             trades = []
             if decision:
                 cash, positions, trades = apply_v5_decision(

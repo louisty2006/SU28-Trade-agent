@@ -105,6 +105,21 @@ def apply_v5_decision(
     pct_add = config.add_pct
     pct_reduce = config.reduce_pct
     actions = getattr(decision, "actions", []) or []
+    # #region agent log
+    try:
+        import json, time
+        _n_actions = len(actions)
+        _n_prices = len(execution_prices)
+        _sample_actions = []
+        for a in actions[:3]:
+            _t = getattr(a, "ticker", "") or (a.get("ticker") if isinstance(a, dict) else "")
+            _a = getattr(a, "action", "") or (a.get("action") if isinstance(a, dict) else "")
+            _sample_actions.append({"ticker": _t, "action": _a})
+        with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+            _dbg.write(json.dumps({"hypothesisId": "H7", "message": "apply_v5_decision_entry", "data": {"n_actions": _n_actions, "n_exec_prices": _n_prices, "cash": cash, "sample_actions": _sample_actions, "exec_prices_sample": list(execution_prices.items())[:3]}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # #endregion
     for act in actions:
         ticker = getattr(act, "ticker", "") or (act.get("ticker") if isinstance(act, dict) else "")
         action = (getattr(act, "action", "HOLD") or "HOLD").upper()
@@ -121,6 +136,14 @@ def apply_v5_decision(
                 pct = size_pct / 100.0
             amt = new_cash * min(pct, 1.0)
             qty = int(amt / price)
+            # #region agent log
+            try:
+                import json, time
+                with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                    _dbg.write(json.dumps({"hypothesisId": "H7", "message": "buy_calculation", "data": {"ticker": ticker, "price": price, "pct": pct, "amt": amt, "qty": qty, "new_cash": new_cash}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            # #endregion
             if qty <= 0:
                 continue
             cost = qty * price
