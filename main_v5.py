@@ -209,9 +209,27 @@ def main():
     parser.add_argument('--daily', action='store_true', help='运行每日分析')
     parser.add_argument('--monitor', action='store_true', help='启动即时监控')
     parser.add_argument('--stats', action='store_true', help='显示统计信息')
+    parser.add_argument('--backtest', nargs=2, metavar=('START_DATE', 'END_DATE'),
+                        help='运行回测（for Orchestrator）格式: YYYY-MM-DD YYYY-MM-DD')
     
     args = parser.parse_args()
     
+    # 回测模式（Orchestrator 对接）
+    if args.backtest:
+        from core.backtest_engine import run_backtest_for_orchestrator
+        start_date, end_date = args.backtest
+        print("\n" + "=" * 70)
+        print("🔗 REISHI v5.0 回测模式（Orchestrator 对接）")
+        print("=" * 70)
+        summary_path, trades_path = run_backtest_for_orchestrator(start_date, end_date)
+        print("\n" + "=" * 70)
+        print("✅ 回测完成")
+        print(f"📄 摘要: {summary_path}")
+        print(f"📄 交易: {trades_path}")
+        print("=" * 70)
+        return
+    
+    # 正常模式
     reishi = ReishiV5()
     
     if args.daily:
@@ -226,6 +244,7 @@ def main():
         print("[1] 运行每日分析")
         print("[2] 启动即时监控")
         print("[3] 显示统计信息")
+        print("[4] 运行回测（Orchestrator）")
         choice = input("\n选择: ")
         
         if choice == "1":
@@ -234,6 +253,14 @@ def main():
             reishi.start_monitoring()
         elif choice == "3":
             reishi.show_statistics()
+        elif choice == "4":
+            from core.backtest_engine import run_backtest_for_orchestrator
+            start = input("开始日期 (YYYY-MM-DD): ")
+            end = input("结束日期 (YYYY-MM-DD): ")
+            summary_path, trades_path = run_backtest_for_orchestrator(start, end)
+            print(f"\n✅ 完成！")
+            print(f"摘要: {summary_path}")
+            print(f"交易: {trades_path}")
         else:
             print("无效选项")
 
