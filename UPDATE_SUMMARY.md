@@ -196,3 +196,71 @@ grep "三數據源" ~/stock_scanner/config.py
 現在就開始註冊 API Keys，體驗三數據源驗證的強大功能吧！
 
 **推薦**：先註冊 IEX Cloud + Twelve Data（只需 5 分鐘），就能開始了！
+
+---
+
+## 🔗 v4.3+ Orchestrator 對接（2026-02-02）
+
+### 新增功能
+
+#### 1. 動態參數配置
+- **支援讀取 `config.json`**：Orchestrator 可動態生成參數組合
+- **自動應用配置**：Scanner 啟動時自動偵測並應用
+- **零代碼修改**：無需修改 Python 代碼，只需提供 JSON 配置
+
+**範例 config.json**：
+```json
+{
+  "stage1_weights": {
+    "rsi": 0.20,
+    "macd": 0.15,
+    ...
+  },
+  "stage2_weights": {
+    "stage1_score": 0.30,
+    ...
+  },
+  "backtest_initial_cash": 40000.0
+}
+```
+
+#### 2. 標準化輸出格式
+- **backtest_summary.csv**：每日盈虧（date, portfolio_value, cash, positions_count, return_pct）
+- **backtest_trades.csv**：交易清單（date, ticker, action, price, quantity）
+- **符合 Orchestrator 評分接口**：直接供 evaluator.py 計算 Sortino、MDD 等指標
+
+#### 3. 統一基準參數
+- **初始資金**：從 7,000 USD 調整為 **40,000 HKD**
+- **與 Orchestrator 保持一致**：所有實驗使用相同基準，方便橫向對比
+
+### 協作流程
+
+```
+Orchestrator                    Scanner
+    │                              │
+    ├─ 生成 config.json ────────>  │
+    │                              ├─ 讀取配置
+    │                              ├─ 執行回測
+    │                              ├─ 輸出 CSV
+    │  <──── backtest_summary.csv ─┤
+    │  <──── backtest_trades.csv ──┤
+    │                              │
+    ├─ 計算 Sortino Ratio         │
+    ├─ 計算 MDD 懲罰               │
+    ├─ 評分與偏差檢測             │
+    └─ 產出最佳參數組合            │
+```
+
+### 新增檔案
+- `config.json.example`：Orchestrator 配置範例
+- `ORCHESTRATOR_INTEGRATION.md`：完整對接文檔
+
+### 查看詳細說明
+```bash
+cat ORCHESTRATOR_INTEGRATION.md
+```
+
+---
+
+**版本**：v4.3  
+**最後更新**：2026-02-02

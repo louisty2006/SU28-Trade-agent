@@ -184,13 +184,17 @@ def apply_decision(
     position_prices: Dict[str, float],
     new_entry_prices: Dict[str, float],
     today_str: str,
-) -> Tuple[float, List[Dict]]:
+) -> Tuple[float, List[Dict], List[Dict]]:
     """
-    依當日 AI 決策與當日收盤價執行買賣，回傳 (新現金, 新持倉)。
+    依當日 AI 決策與當日收盤價執行買賣，回傳 (新現金, 新持倉, 交易記錄)。
     無偷看：僅使用當日收盤價。
+    
+    交易記錄格式：[{"date": str, "ticker": str, "action": str, "price": float, "quantity": int}, ...]
     """
+    trades = []  # 🔗 Orchestrator 對接：記錄所有交易
+    
     if not decision:
-        return cash, positions
+        return cash, positions, trades
 
     pos_by_ticker = {p["ticker"]: p for p in positions}
     new_positions = []
@@ -209,10 +213,24 @@ def apply_decision(
 
         if action == "出場":
             cash += price * qty
+            trades.append({
+                "date": today_str,
+                "ticker": ticker,
+                "action": "sell",
+                "price": round(price, 2),
+                "quantity": qty,
+            })
             continue
         if action == "減碼":
             sell_qty = max(1, int(qty * BACKTEST_REDUCE_PCT))
             cash += price * sell_qty
+            trades.append({
+                "date": today_str,
+                "ticker": ticker,
+                "action": "reduce",
+                "price": round(price, 2),
+                "quantity": sell_qty,
+            })
             qty -= sell_qty
             if qty <= 0:
                 continue
@@ -227,6 +245,13 @@ def apply_decision(
                 add_qty = int(add_cash / price)
                 if add_qty >= 1:
                     cash -= add_qty * price
+                    trades.append({
+                        "date": today_str,
+                        "ticker": ticker,
+                        "action": "add",
+                        "price": round(price, 2),
+                        "quantity": add_qty,
+                    })
                     new_positions.append({
                         "ticker": ticker,
                         "buy_date": p["buy_date"],
@@ -257,6 +282,13 @@ def apply_decision(
         if qty < 1:
             continue
         cash -= qty * price
+        trades.append({
+            "date": today_str,
+            "ticker": ticker,
+            "action": "buy",
+            "price": round(price, 2),
+            "quantity": qty,
+        })
         new_positions.append({
             "ticker": ticker,
             "buy_date": today_str,
@@ -268,7 +300,7 @@ def apply_decision(
         })
         held_tickers.add(ticker)
 
-    return cash, new_positions
+    return cash, new_positions, trades
 
 
 def write_positions_csv(path: str, positions: List[Dict]) -> None:

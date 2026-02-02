@@ -8,7 +8,11 @@ import os
 import sys
 import argparse
 from datetime import datetime, date, timedelta
-from config import REIKAN_RUN_LOG, REIKAN_STAGE1_CSV, REIKAN_STAGE3_CSV, APP_NAME, APP_NAME_JP, VERSION
+from config import (
+    REIKAN_RUN_LOG, REIKAN_STAGE1_CSV, REIKAN_STAGE3_CSV, 
+    APP_NAME, APP_NAME_JP, VERSION,
+    apply_orchestrator_config
+)
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +299,7 @@ def run_backtest_range(start_dt: date, end_dt: date, quick: bool = False):
 
     start_time = datetime.now()
     summary_rows = []
+    all_trades = []  # 🔗 Orchestrator 對接：記錄所有交易
 
     print("\n" + "=" * 70)
     print("🔮 啟動霊視，洞察市場")
@@ -344,9 +349,10 @@ def run_backtest_range(start_dt: date, end_dt: date, quick: bool = False):
                     break
             if price is not None:
                 execution_prices_d[ticker] = price
-        cash, positions = apply_decision(
+        cash, positions, trades = apply_decision(
             cash, positions, decision, execution_prices_d, execution_prices_d, d.strftime("%Y-%m-%d"),
         )
+        all_trades.extend(trades)  # 累積所有交易記錄
         save_state(state_dir, cash, positions, d)
         value = portfolio_value(cash, positions, execution_prices_d)
         ret_pct = (value - BACKTEST_INITIAL_CASH) / BACKTEST_INITIAL_CASH * 100
@@ -359,13 +365,23 @@ def run_backtest_range(start_dt: date, end_dt: date, quick: bool = False):
         })
         print(f"   組合價值 {value:.0f} | 報酬 {ret_pct:+.2f}%")
 
-    # 寫入回測摘要
+    # 🔗 Orchestrator 對接：寫入回測摘要（每日盈虧）與交易清單
     import csv as csv_module
+    
+    # 1. backtest_summary.csv - 每日組合價值與盈虧
     summary_path = os.path.join(base_dir_abs, "backtest_summary.csv")
     with open(summary_path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv_module.DictWriter(f, fieldnames=["date", "portfolio_value", "cash", "positions_count", "return_pct"])
         w.writeheader()
         w.writerows(summary_rows)
+    
+    # 2. backtest_trades.csv - 交易清單（date, ticker, action, price, quantity）
+    trades_path = os.path.join(base_dir_abs, "backtest_trades.csv")
+    with open(trades_path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv_module.DictWriter(f, fieldnames=["date", "ticker", "action", "price", "quantity"])
+        w.writeheader()
+        w.writerows(all_trades)
+    
     final_value = summary_rows[-1]["portfolio_value"] if summary_rows else BACKTEST_INITIAL_CASH
     final_ret = (final_value - BACKTEST_INITIAL_CASH) / BACKTEST_INITIAL_CASH * 100
     duration = (datetime.now() - start_time).total_seconds()
@@ -373,12 +389,14 @@ def run_backtest_range(start_dt: date, end_dt: date, quick: bool = False):
     print("🎉 回測 range 完成")
     print("=" * 70)
     print(f"總交易日: {len(trading_days)}")
-    print(f"初始現金: {BACKTEST_INITIAL_CASH:,.0f}")
+    print(f"初始現金: {BACKTEST_INITIAL_CASH:,.0f} HKD")
     print(f"期末組合價值: {final_value:,.2f}")
     print(f"總報酬率: {final_ret:+.2f}%")
+    print(f"總交易次數: {len(all_trades)}")
     print(f"總耗時: {duration/60:.1f} 分鐘")
     print(f"📁 報告與摘要: {base_dir_abs}")
-    print(f"📄 每日價值: {summary_path}")
+    print(f"📄 每日盈虧: {summary_path}")
+    print(f"📄 交易清單: {trades_path}")
     print("=" * 70)
 
 
@@ -412,6 +430,9 @@ def run_test_all():
 
 
 def main():
+    # 🔗 Orchestrator 對接：檢查並應用動態配置
+    apply_orchestrator_config()
+    
     parser = argparse.ArgumentParser(description=f'{APP_NAME} v{VERSION}')
     parser.add_argument('--all', action='store_true', help='運行完整流程 (Stage 1→2→3)')
     parser.add_argument('--stage1', action='store_true', help='只運行 Stage 1')

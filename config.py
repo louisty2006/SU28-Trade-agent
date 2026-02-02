@@ -24,8 +24,13 @@
 💡 實際可處理：
   - Stage 1: 10,000+ 支（僅 Yahoo）
   - Stage 2: 1,000 支（三源驗證，有充足備用）
+
+🔗 Orchestrator 對接：
+  - 支援讀取 config.json 動態調參
+  - 輸出 backtest_summary.csv 供 Orchestrator 評分
 """
 import os
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -291,7 +296,84 @@ VERSION = "4.3"
 # ---------------------------------------------------------------------------
 # 回測模擬（365 天逐日）
 # ---------------------------------------------------------------------------
-BACKTEST_INITIAL_CASH = 7_000.0        # 回測 Day0 起動資本（USD）
+BACKTEST_INITIAL_CASH = 40_000.0       # 回測 Day0 起動資本（HKD）- Orchestrator 統一基準
 BACKTEST_PCT_PER_NEW_ENTRY = 0.20      # 每筆新買入動用現金比例（最多 3 筆）
 BACKTEST_ADD_PCT = 0.10                # 加碼時動用現金比例
 BACKTEST_REDUCE_PCT = 0.50              # 減碼時賣出持倉比例
+
+# ---------------------------------------------------------------------------
+# Orchestrator 對接：動態參數讀取
+# ---------------------------------------------------------------------------
+def load_orchestrator_config(config_path: str = "config.json"):
+    """
+    讀取 Orchestrator 動態生成的 config.json
+    若檔案不存在或讀取失敗，返回 None（使用預設配置）
+    
+    預期 JSON 結構範例：
+    {
+        "stage1_weights": {
+            "rsi": 0.20,
+            "macd": 0.15,
+            ...
+        },
+        "stage2_weights": {
+            "stage1_score": 0.30,
+            "financial_health": 0.25,
+            ...
+        },
+        "backtest_initial_cash": 40000.0,
+        ...
+    }
+    """
+    if not os.path.exists(config_path):
+        return None
+    
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        return config
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"⚠️ 讀取 {config_path} 失敗: {e}")
+        return None
+
+
+def apply_orchestrator_config():
+    """
+    應用 Orchestrator 配置（若存在）
+    自動覆寫全局配置變數
+    """
+    global STAGE1_WEIGHTS, STAGE2_WEIGHTS, BACKTEST_INITIAL_CASH
+    global BACKTEST_PCT_PER_NEW_ENTRY, BACKTEST_ADD_PCT, BACKTEST_REDUCE_PCT
+    
+    config = load_orchestrator_config()
+    if not config:
+        return False
+    
+    print("🔗 偵測到 Orchestrator config.json，正在應用動態參數...")
+    
+    # 應用 Stage 1 權重
+    if "stage1_weights" in config:
+        STAGE1_WEIGHTS.update(config["stage1_weights"])
+        print(f"   ✓ Stage 1 權重已更新")
+    
+    # 應用 Stage 2 權重
+    if "stage2_weights" in config:
+        STAGE2_WEIGHTS.update(config["stage2_weights"])
+        print(f"   ✓ Stage 2 權重已更新")
+    
+    # 應用回測參數
+    if "backtest_initial_cash" in config:
+        BACKTEST_INITIAL_CASH = float(config["backtest_initial_cash"])
+        print(f"   ✓ 初始資金已更新: {BACKTEST_INITIAL_CASH:,.0f} HKD")
+    
+    if "backtest_pct_per_new_entry" in config:
+        BACKTEST_PCT_PER_NEW_ENTRY = float(config["backtest_pct_per_new_entry"])
+    
+    if "backtest_add_pct" in config:
+        BACKTEST_ADD_PCT = float(config["backtest_add_pct"])
+    
+    if "backtest_reduce_pct" in config:
+        BACKTEST_REDUCE_PCT = float(config["backtest_reduce_pct"])
+    
+    print("🔗 Orchestrator 配置應用完成\n")
+    return True

@@ -1,0 +1,336 @@
+# REISHI Stock Scanner - Orchestrator 對接文檔
+
+> 本文檔說明 REISHI Stock Scanner 與 Orchestrator 的對接規範
+
+---
+
+## 📋 概述
+
+根據《開發分工正式宣言》（2026-02-02），REISHI Stock Scanner 實施自動化優化迴圈，支援 Orchestrator 動態調參與評分。
+
+**分工：**
+- **Stock Scanner**：負責選股、回測執行、輸出原始結果
+- **Orchestrator**：負責參數優化、評分計算、偏差檢測
+
+---
+
+## 🔗 接口契約
+
+### 1. 輸入：`config.json`（Orchestrator → Scanner）
+
+**位置**：專案根目錄 `/Users/lautinyam/stock_scanner/config.json`
+
+**功能**：Orchestrator 動態生成參數組合，Scanner 自動讀取並應用
+
+**範例結構**：
+
+```json
+{
+  "stage1_weights": {
+    "rsi": 0.20,
+    "macd": 0.15,
+    "kd": 0.12,
+    "bollinger": 0.10,
+    "volume": 0.08,
+    "price_momentum": 0.15,
+    "from_high": 0.10,
+    "from_low": 0.10
+  },
+  "stage2_weights": {
+    "stage1_score": 0.30,
+    "financial_health": 0.25,
+    "valuation": 0.20,
+    "growth": 0.15,
+    "news_sentiment": 0.10
+  },
+  "backtest_initial_cash": 40000.0,
+  "backtest_pct_per_new_entry": 0.20,
+  "backtest_add_pct": 0.10,
+  "backtest_reduce_pct": 0.50
+}
+```
+
+**使用方式**：
+- Scanner 在啟動時自動偵測 `config.json`
+- 若檔案存在，覆寫預設配置
+- 若檔案不存在或讀取失敗，使用預設配置
+
+**參數說明**：
+| 參數                        | 說明                           | 預設值  |
+|-----------------------------|--------------------------------|---------|
+| `stage1_weights`            | Stage 1 技術指標權重            | 見範例  |
+| `stage2_weights`            | Stage 2 基本面權重              | 見範例  |
+| `backtest_initial_cash`     | 回測初始資金（HKD）             | 40000.0 |
+| `backtest_pct_per_new_entry`| 每筆新買入佔現金比例            | 0.20    |
+| `backtest_add_pct`          | 加碼時動用現金比例              | 0.10    |
+| `backtest_reduce_pct`       | 減碼時賣出持倉比例              | 0.50    |
+
+---
+
+### 2. 輸出：回測結果（Scanner → Orchestrator）
+
+**位置**：`reports/backtest_range/日期區間/`
+
+#### 2.1 每日盈虧：`backtest_summary.csv`
+
+**格式**：
+
+| 欄位              | 說明                     | 範例       |
+|-------------------|--------------------------|------------|
+| `date`            | 交易日                   | 2025-01-15 |
+| `portfolio_value` | 組合總價值（HKD）        | 42150.50   |
+| `cash`            | 剩餘現金（HKD）          | 8000.00    |
+| `positions_count` | 持倉數量                 | 3          |
+| `return_pct`      | 累計報酬率（%）          | 5.38       |
+
+**範例**：
+```csv
+date,portfolio_value,cash,positions_count,return_pct
+2025-01-15,42150.50,8000.00,3,5.38
+2025-01-16,43200.75,8000.00,3,8.00
+```
+
+#### 2.2 交易清單：`backtest_trades.csv`
+
+**格式**：
+
+| 欄位       | 說明                               | 範例    |
+|------------|------------------------------------|---------|
+| `date`     | 交易日                             | 2025-01-15 |
+| `ticker`   | 股票代碼                           | AAPL    |
+| `action`   | 交易動作（buy/sell/add/reduce）    | buy     |
+| `price`    | 執行價格（收盤價）                 | 150.25  |
+| `quantity` | 交易股數                           | 50      |
+
+**範例**：
+```csv
+date,ticker,action,price,quantity
+2025-01-15,AAPL,buy,150.25,50
+2025-01-16,GOOGL,buy,2800.50,10
+2025-01-17,AAPL,add,152.00,20
+2025-01-20,TSLA,sell,245.75,30
+```
+
+**Action 說明**：
+- `buy`：新買入
+- `sell`：出場（全部賣出）
+- `add`：加碼（追加買入）
+- `reduce`：減碼（部分賣出）
+
+---
+
+## 🎯 評分邏輯（由 Orchestrator 實現）
+
+Scanner **不需實作**以下邏輯，僅輸出原始數據供 Orchestrator 計算：
+
+### Objective Function
+
+```
+Score = Sortino Ratio × MDD_Penalty × Cost_Factor
+```
+
+**MDD 懲罰**：
+- MDD > 30%：分數 = 0
+- MDD > 20%：分數 × 0.5
+- 否則：不懲罰
+
+**交易成本**：
+- 美股：單邊 0.1%
+- 港股：單邊 0.2%
+
+### 偏差檢測（過擬合警示）
+
+| 指標                          | 警示門檻 | 說明                 |
+|-------------------------------|----------|----------------------|
+| 年化報酬 (Annualized Return)  | > 50%    | 疑似過度樂觀         |
+| 夏普比率 (Sharpe Ratio)       | > 3.0    | 風險調整後報酬過高   |
+| 最大回撤 (Max Drawdown)       | < 5%     | 波動過低，不真實     |
+| 勝率 (Win Rate)               | > 70%    | 可能過擬合           |
+
+**處理**：若觸發任一門檻，Orchestrator 自動標記為「疑似過擬合」並打回重做。
+
+---
+
+## 🚀 使用流程
+
+### 1. Orchestrator 生成參數
+
+```python
+# Orchestrator 側
+config = {
+    "stage1_weights": {...},
+    "stage2_weights": {...},
+    "backtest_initial_cash": 40000.0,
+}
+with open("/path/to/stock_scanner/config.json", "w") as f:
+    json.dump(config, f, indent=2)
+```
+
+### 2. Scanner 執行回測
+
+```bash
+cd /Users/lautinyam/stock_scanner
+python main.py --backtest 2025-01-01 2025-01-31 --quick
+```
+
+### 3. Orchestrator 讀取結果
+
+```python
+# Orchestrator 側
+import pandas as pd
+
+# 讀取每日盈虧
+summary = pd.read_csv("reports/backtest_range/.../backtest_summary.csv")
+
+# 讀取交易清單
+trades = pd.read_csv("reports/backtest_range/.../backtest_trades.csv")
+
+# 計算評分指標
+sortino = calculate_sortino(summary)
+mdd = calculate_max_drawdown(summary)
+score = sortino * mdd_penalty(mdd) * cost_factor(trades)
+```
+
+---
+
+## 📌 共識基準
+
+**所有回測統一使用**：
+- **初始資金**：`40,000 HKD`（與 Orchestrator 保持一致）
+- **交易成本**：美股 0.1%、港股 0.2%（單邊）
+- **執行價格**：當日收盤價（無偷看未來）
+- **決策數據**：僅使用前一交易日及之前的數據
+
+---
+
+## 🔧 技術細節
+
+### config.json 讀取邏輯
+
+```python
+# config.py
+def apply_orchestrator_config():
+    config = load_orchestrator_config()
+    if not config:
+        return False
+    
+    # 應用 Stage 權重
+    if "stage1_weights" in config:
+        STAGE1_WEIGHTS.update(config["stage1_weights"])
+    
+    if "stage2_weights" in config:
+        STAGE2_WEIGHTS.update(config["stage2_weights"])
+    
+    # 應用回測參數
+    if "backtest_initial_cash" in config:
+        BACKTEST_INITIAL_CASH = float(config["backtest_initial_cash"])
+    
+    return True
+```
+
+### 交易記錄捕獲
+
+```python
+# backtest_simulator.py
+def apply_decision(...) -> Tuple[float, List[Dict], List[Dict]]:
+    trades = []
+    
+    # 記錄每筆交易
+    if action == "出場":
+        trades.append({
+            "date": today_str,
+            "ticker": ticker,
+            "action": "sell",
+            "price": round(price, 2),
+            "quantity": qty,
+        })
+    
+    return cash, new_positions, trades
+```
+
+---
+
+## 📊 範例輸出
+
+### backtest_summary.csv
+```csv
+date,portfolio_value,cash,positions_count,return_pct
+2025-01-15,42150.50,8000.00,3,5.38
+2025-01-16,43200.75,8000.00,3,8.00
+2025-01-17,41800.25,10500.00,2,4.50
+```
+
+### backtest_trades.csv
+```csv
+date,ticker,action,price,quantity
+2025-01-15,AAPL,buy,150.25,50
+2025-01-15,GOOGL,buy,2800.50,10
+2025-01-16,MSFT,buy,380.00,20
+2025-01-17,AAPL,add,152.00,20
+2025-01-20,GOOGL,sell,2850.75,10
+```
+
+---
+
+## 🧪 測試步驟
+
+### 1. 測試默認配置
+```bash
+# 不提供 config.json，使用預設參數
+python main.py --backtest 2025-01-15 2025-01-20 --quick
+```
+
+### 2. 測試動態配置
+```bash
+# 複製範例配置
+cp config.json.example config.json
+
+# 修改 config.json 中的參數
+# 執行回測
+python main.py --backtest 2025-01-15 2025-01-20 --quick
+
+# 驗證輸出
+ls reports/backtest_range/*/backtest_summary.csv
+ls reports/backtest_range/*/backtest_trades.csv
+```
+
+### 3. 驗證輸出格式
+```python
+import pandas as pd
+
+# 檢查欄位
+summary = pd.read_csv("reports/.../backtest_summary.csv")
+assert list(summary.columns) == ["date", "portfolio_value", "cash", "positions_count", "return_pct"]
+
+trades = pd.read_csv("reports/.../backtest_trades.csv")
+assert list(trades.columns) == ["date", "ticker", "action", "price", "quantity"]
+```
+
+---
+
+## 📞 聯繫與協作
+
+**Scanner 維護者**：Louis  
+**Orchestrator 維護者**：朋友
+
+**協作流程**：
+1. Orchestrator 透過數千次隨機搜尋/貝葉斯優化產出最佳參數
+2. 產出「最佳參數組合」與「可重現種子」
+3. Scanner 針對該組合進行蒙地卡羅模擬與樣本外測試
+
+---
+
+## 🎉 完成檢查清單
+
+- [x] Scanner 支援讀取 `config.json`
+- [x] 初始資金調整為 40,000 HKD
+- [x] 輸出 `backtest_summary.csv`（每日盈虧）
+- [x] 輸出 `backtest_trades.csv`（交易清單）
+- [x] 欄位格式符合接口契約（date, ticker, action, price, quantity）
+- [x] 交易成本由 Orchestrator 計算（Scanner 僅輸出原始數據）
+- [x] Sortino Ratio 與 MDD 懲罰由 Orchestrator 計算
+
+---
+
+**版本**：v4.3  
+**最後更新**：2026-02-02

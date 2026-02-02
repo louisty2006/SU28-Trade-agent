@@ -1,0 +1,24 @@
+{
+  "comment": "此為 Orchestrator 動態配置範例 - 複製為 config.json 並修改參數即可",
+  "stage1_weights": {
+    "rsi": 0.20,
+    "macd": 0.15,
+    "kd": 0.12,
+    "bollinger": 0.10,
+    "volume": 0.08,
+    "price_momentum": 0.15,
+    "from_high": 0.10,
+    "from_low": 0.10
+  },
+  "stage2_weights": {
+    "stage1_score": 0.30,
+    "financial_health": 0.25,
+    "valuation": 0.20,
+    "growth": 0.15,
+    "news_sentiment": 0.10
+  },
+  "backtest_initial_cash": 40000.0,
+  "backtest_pct_per_new_entry": 0.20,
+  "backtest_add_pct": 0.10,
+  "backtest_reduce_pct": 0.50
+}
