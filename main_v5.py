@@ -356,8 +356,20 @@ class ReishiV5:
             import json
             _n_pattern = len(pattern_analysis) if pattern_analysis else 0
             _pattern_tickers = [getattr(c, "ticker", "") for c in (pattern_analysis or [])][:5]
+            _pattern_details = []
+            for c in (pattern_analysis or [])[:3]:
+                _pattern_details.append({
+                    "ticker": getattr(c, 'ticker', '?'),
+                    "type": getattr(c, 'pattern_type', '?'),
+                    "current_price": getattr(c, 'current_price', None),
+                    "entry_low": getattr(c, 'entry_price_low', None),
+                    "entry_high": getattr(c, 'entry_price_high', None),
+                    "stop_loss": getattr(c, 'stop_loss', None),
+                    "target_price": getattr(c, 'target_price', None),
+                    "reasoning": (getattr(c, 'reasoning', '') or '')[:50]
+                })
             with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                _dbg.write(json.dumps({"hypothesisId": "H5", "message": "pattern_analysis_result", "data": {"n_candidates": _n_pattern, "candidate_tickers": _pattern_tickers}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+                _dbg.write(json.dumps({"hypothesisId": "H5", "message": "pattern_analysis_result", "data": {"n_candidates": _n_pattern, "candidate_tickers": _pattern_tickers, "pattern_details": _pattern_details}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
         except Exception:
             pass
         # #endregion

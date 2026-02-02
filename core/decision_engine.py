@@ -92,8 +92,43 @@ class AllAnalyses:
     
     def summary(self) -> str:
         """简要摘要"""
+        # 处理 pattern（可能是 List[PatternCandidate]）
+        pattern_summary = '無'
+        if self.pattern:
+            if hasattr(self.pattern, 'summary'):
+                pattern_summary = self.pattern.summary()
+            elif isinstance(self.pattern, list) and len(self.pattern) > 0:
+                # 生成详细的候选摘要，包含交易参数
+                lines = [f"發現 {len(self.pattern)} 個候選："]
+                for c in self.pattern[:3]:  # 最多显示前3个
+                    ticker = getattr(c, 'ticker', '?')
+                    ptype = getattr(c, 'pattern_type', '?')
+                    score = getattr(c, 'score', 0)
+                    current = getattr(c, 'current_price', None)
+                    entry_low = getattr(c, 'entry_price_low', None)
+                    entry_high = getattr(c, 'entry_price_high', None)
+                    stop = getattr(c, 'stop_loss', None)
+                    target = getattr(c, 'target_price', None)
+                    reasoning = getattr(c, 'reasoning', '')
+                    
+                    line = f"  • {ticker} ({ptype}, 得分 {score:.2f})"
+                    if current:
+                        line += f", 當前價 ${current:.2f}"
+                    if entry_low and entry_high:
+                        line += f", 建議進場 ${entry_low:.2f}-${entry_high:.2f}"
+                    if stop:
+                        risk_pct = ((current - stop) / current * 100) if current else 0
+                        line += f", 止損 ${stop:.2f} (風險 {risk_pct:.1f}%)"
+                    if target:
+                        reward_pct = ((target - current) / current * 100) if current else 0
+                        line += f", 目標 ${target:.2f} (潛在報酬 {reward_pct:.1f}%)"
+                    if reasoning:
+                        line += f", {reasoning}"
+                    lines.append(line)
+                pattern_summary = "\n".join(lines)
+        
         return f"""
-圖表型態: {getattr(self.pattern, 'summary', lambda: '無')() if self.pattern else '無'}
+圖表型態: {pattern_summary}
 因果推理: {getattr(self.causal, 'summary', lambda: '無')() if self.causal else '無'}
 情緒分析: {getattr(self.sentiment, 'summary', lambda: '無')() if self.sentiment else '無'}
 Multi-Agent: {getattr(self.multi_agent, 'summary', lambda: '無')() if self.multi_agent else '無'}
@@ -138,6 +173,11 @@ class DecisionEngine:
 1. 具體操作（股票、價格、數量、停損）
 2. 理由（為什麼這樣做最符合三大原則）
 3. 信心度
+
+**使用分析中提供的交易參數**：
+- 如果圖表型態分析提供了「建議進場」、「止損」、「目標」價格，請優先使用這些參數
+- 你可以根據風險管理原則微調這些參數（例如：收緊止損、調整倉位大小）
+- 如果沒有提供價格建議，則需要明確說明為何無法執行該操作
 
 如果今天不應該有任何操作，也要說明原因。
 
@@ -186,11 +226,21 @@ class DecisionEngine:
         on_llm_progress: 可選 callback(phase, total, message) 回報決策引擎內 3 次 LLM 呼叫進度
         """
         # 1. 準備 prompt
+        analyses_summary = analyses.summary()
         prompt = self.DECISION_PROMPT.format(
             cash=state.cash,
             positions=state.positions_summary(),
-            analyses=analyses.summary()
+            analyses=analyses_summary
         )
+        
+        # #region agent log
+        try:
+            import json, time
+            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                _dbg.write(json.dumps({"hypothesisId": "H8", "message": "analyses_summary_sent_to_llm", "data": {"summary_len": len(analyses_summary), "summary_preview": analyses_summary[:500], "full_summary": analyses_summary}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
         
         # 2. 使用防幻覺機制調用 LLM（如果可用）
         if self.anti_hallucination:

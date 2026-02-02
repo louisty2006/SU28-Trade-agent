@@ -27,6 +27,13 @@ class PatternCandidate:
     pattern_type: str
     score: float
     data: pd.DataFrame
+    # 交易建议参数
+    current_price: Optional[float] = None
+    entry_price_low: Optional[float] = None
+    entry_price_high: Optional[float] = None
+    stop_loss: Optional[float] = None
+    target_price: Optional[float] = None
+    reasoning: str = ""
 
 
 class PatternRecognition:
@@ -47,13 +54,36 @@ class PatternRecognition:
             if callable(on_ticker):
                 on_ticker(ticker, idx + 1, total)
             # 检测各种型态
-            breakout = self.detect_breakout(ticker, market_data.get(ticker))
-            if breakout:
+            df = market_data.get(ticker)
+            breakout = self.detect_breakout(ticker, df)
+            if breakout and df is not None and len(df) > 0:
+                # 计算交易参数
+                current = df['Close'].iloc[-1]
+                high_20d = df['High'].iloc[-20:].max()
+                low_20d = df['Low'].iloc[-20:].min()
+                
+                # 进场区间：当前价 ± 2%
+                entry_low = current * 0.98
+                entry_high = current * 1.02
+                
+                # 止损：20日低点下方 2%（风险约 15-20%）
+                stop = low_20d * 0.98
+                
+                # 目标价：基于突破后上涨空间（风险回报比 2:1）
+                risk = current - stop
+                target = current + (risk * 2.0)
+                
                 candidates.append(PatternCandidate(
                     ticker=ticker,
                     pattern_type='breakout',
                     score=0.7,
-                    data=market_data.get(ticker)
+                    data=df,
+                    current_price=float(current),
+                    entry_price_low=float(entry_low),
+                    entry_price_high=float(entry_high),
+                    stop_loss=float(stop),
+                    target_price=float(target),
+                    reasoning=f"突破 20 日高点 ${high_20d:.2f}，风险回报比 2:1"
                 ))
         return candidates
     
@@ -78,7 +108,7 @@ class PatternRecognition:
                 ticker=ticker,
                 pattern_type='breakout',
                 confidence=0.7,
-                description=f"{ticker} 接近或突破20日新高"
+                description=f"{ticker} 接近或突破20日新高 (当前: ${current_price:.2f}, 20日高点: ${max_20d:.2f})"
             )
         
         return None
