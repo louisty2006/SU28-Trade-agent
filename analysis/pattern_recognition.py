@@ -35,14 +35,17 @@ class PatternRecognition:
     混合方案：规则侦测（快速筛选）+ LLM看图（精确验证）
     """
     
-    def scan_all(self, tickers: List[str], market_data: dict) -> List[PatternCandidate]:
+    def scan_all(self, tickers: List[str], market_data: dict, on_ticker=None) -> List[PatternCandidate]:
         """
         第一阶段：规则侦测，快速扫描全市场
-        返回候选清单（约 50-100 支）
+        返回候选清单（约 50-100 支）。on_ticker(ticker, index, total) 可選，回報正在掃描的標的。
         """
         candidates = []
-        
-        for ticker in tickers[:50]:  # MVP: 限制扫描数量
+        limited = tickers[:50]  # MVP: 限制扫描数量
+        total = len(limited)
+        for idx, ticker in enumerate(limited):
+            if callable(on_ticker):
+                on_ticker(ticker, idx + 1, total)
             # 检测各种型态
             breakout = self.detect_breakout(ticker, market_data.get(ticker))
             if breakout:
@@ -52,7 +55,6 @@ class PatternRecognition:
                     score=0.7,
                     data=market_data.get(ticker)
                 ))
-        
         return candidates
     
     def detect_breakout(self, ticker: str, data: Optional[pd.DataFrame]) -> Optional[Pattern]:

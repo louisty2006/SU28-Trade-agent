@@ -107,51 +107,78 @@ class ReishiV5:
     
     def run_daily(self):
         """
-        每日运行
+        每日运行。Log 依流程圖結構輸出：輸入層 → 第一層防護 → 五大 AI 分析層 → 第二層防護 → 輸出驗證與審計 → 報告。
         """
+        from reporting.flow_logger import FlowLogger
         print("\n" + "=" * 70)
         print("🔮 REISHI 霊視 v5.0 - 每日分析")
         print("=" * 70)
-        
+        flow_logger = FlowLogger(flush_each=True)
         try:
-            # 1. 获取并验证数据
+            tickers_to_fetch = self._get_scan_tickers()
+            # 即時新聞：Finnhub 公司新聞（輸入層用）
+            from utils.news_fetcher import fetch_news_for_tickers, to_news_objects
+            to_date = datetime.now().strftime("%Y-%m-%d")
+            from_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+            all_news_raw, news_by_ticker_raw = fetch_news_for_tickers(tickers_to_fetch, from_date, to_date)
+            all_news_for_causal = to_news_objects(all_news_raw)
+            news_by_ticker_for_sentiment = {t: to_news_objects(news_by_ticker_raw.get(t, [])) for t in tickers_to_fetch}
+            if all_news_raw:
+                news_desc = f"已載入 {len(all_news_raw)} 筆（Finnhub，{from_date}～{to_date}）"
+            else:
+                try:
+                    from config import FINNHUB_API_KEY
+                    news_desc = "0 筆（該區間無資料）" if (FINNHUB_API_KEY or os.getenv("FINNHUB_API_KEY")) else "0 筆（未設定 FINNHUB_API_KEY）"
+                except Exception:
+                    news_desc = "0 筆（未設定 FINNHUB_API_KEY）"
+            # 輸入層：你的狀態 → 市場數據 → 即時新聞 → 霊視記憶
+            your_state = f"現金 {self.portfolio.cash:,.0f}、持倉 {len(self.portfolio.positions)} 檔、總值 {self.portfolio.total_value:,.0f}"
+            market_data_desc = f"掃描標的 {len(tickers_to_fetch)} 檔（{', '.join(tickers_to_fetch[:8])}{' ...' if len(tickers_to_fetch) > 8 else ''}）"
+            try:
+                mem_stats = self.memory.get_statistics()
+                memory_desc = f"已載入，歷史建議 {mem_stats.get('total_recommendations', 0)} 筆、已執行 {mem_stats.get('executed', 0)}、已完成 {mem_stats.get('completed', 0)}"
+            except Exception:
+                memory_desc = "已載入"
+            flow_logger.log_input_layer(your_state, market_data_desc, news_desc, memory_desc, as_of_date="", mode="每日分析")
+            # 1. 获取并验证数据 — 第一層防護：數據驗證
             print("\n[1/8] 数据获取与验证...")
-            market_data, _ = self._fetch_and_validate_data()
-            tickers = list(market_data.keys()) or self._get_scan_tickers()
+            market_data, data_source = self._fetch_and_validate_data(on_ticker=lambda t, i, n: flow_logger.log_layer1_fetch(t, i, n))
+            flow_logger.log_layer1_start(data_source)
+            tickers = list(market_data.keys()) or tickers_to_fetch
+            flow_logger.log_layer1_result(len(market_data), tickers, data_source=data_source)
             if not market_data:
                 print("   ⚠ 無市場數據，分析將僅有架構輸出")
-            
+            # 五大 AI 方向分析層
+            flow_logger.log_ai_layer_start()
             # 2. 图表型态识别
             print("\n[2/8] 图表型态识别...")
-            pattern_analysis = self.pattern_recognition.scan_all(
-                tickers,
-                market_data
-            )
-            
-            # 3. 因果推理
+            flow_logger.log_ai_2_start(len(tickers))
+            pattern_analysis = self.pattern_recognition.scan_all(tickers, market_data, on_ticker=lambda t, i, n: flow_logger.log_ai_2_fetch(t, i, n))
+            flow_logger.log_ai_2_result(len(pattern_analysis), [getattr(c, "ticker", "") for c in pattern_analysis] if pattern_analysis else None)
+            # 3. 因果推理（傳入即時新聞）
             print("\n[3/8] 因果推理...")
-            causal_analysis = self.causal_reasoning.analyze_all(
-                news=[],
-                portfolio=self.portfolio.positions
-            )
-            
-            # 4. 情绪分析
+            flow_logger.log_ai_3_start()
+            causal_analysis = self.causal_reasoning.analyze_all(news=all_news_for_causal, portfolio=self.portfolio.positions)
+            flow_logger.log_ai_3_result()
+            # 4. 情绪分析（傳入即時新聞 by ticker）
             print("\n[4/8] 情绪分析...")
-            sentiment_analysis = self.sentiment_analyzer.analyze_batch(tickers)
-            
+            flow_logger.log_ai_4_start(len(tickers))
+            sentiment_analysis = self.sentiment_analyzer.analyze_batch(tickers, on_ticker=lambda t, i, n: flow_logger.log_ai_4_fetch(t, i, n), news_by_ticker=news_by_ticker_for_sentiment)
+            flow_logger.log_ai_4_result()
             # 5. Multi-Agent 分析
             print("\n[5/8] Multi-Agent 协作分析...")
-            multi_agent_analysis = self.multi_agent.analyze_all(
-                candidates=pattern_analysis,
-                data=market_data
-            )
-            
+            flow_logger.log_ai_5_start(len(pattern_analysis))
+            multi_agent_analysis = self.multi_agent.analyze_all(candidates=pattern_analysis, data=market_data)
+            flow_logger.log_ai_5_result()
             # 6. 霊視记忆参考
             print("\n[6/8] 霊視记忆参考...")
+            flow_logger.log_ai_6_start()
             memory_insights = self.memory.get_insights_for_candidates(pattern_analysis)
-            
-            # 7. 决策引擎
+            n_insights = len(memory_insights.get("insights", [])) if isinstance(memory_insights, dict) else 0
+            flow_logger.log_ai_6_result(n_insights)
+            # 7. 决策引擎 — 第二層防護：LLM 防幻覺
             print("\n[7/8] 决策引擎...")
+            flow_logger.log_layer2_start()
             all_analyses = AllAnalyses(
                 pattern=pattern_analysis,
                 causal=causal_analysis,
@@ -159,40 +186,36 @@ class ReishiV5:
                 multi_agent=multi_agent_analysis,
                 memory=memory_insights
             )
-            
             decision = self.decision_engine.decide(
                 state=self.portfolio,
-                analyses=all_analyses
+                analyses=all_analyses,
+                on_llm_progress=lambda phase, total, msg, provider=None: flow_logger.log_layer2_llm_phase(phase, total, msg, provider)
             )
-            
+            acts = getattr(decision, "actions", []) or []
+            summary = ", ".join([f"{getattr(a, 'action', '')} {getattr(a, 'ticker', '')}" for a in acts[:3]]) if acts else "無操作"
+            flow_logger.log_layer2_result(len(acts), summary)
             # 8. 验证 + 审计
             print("\n[8/8] 最终验证与审计...")
+            flow_logger.log_validation_start()
             validation = self.output_validator.validate_decision(decision, all_analyses)
+            flow_logger.log_audit_start()
             audit = self.final_auditor.audit(decision, all_analyses)
-            
             # 生成报告
             print("\n生成报告...")
             report = self.report_generator.generate(decision, all_analyses, audit)
-            
-            # 保存报告
             report_dir = f"reports/daily"
             os.makedirs(report_dir, exist_ok=True)
             report_path = f"{report_dir}/{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.md"
             report.save(report_path)
-            
-            # 发送报告
+            flow_logger.log_report_start(report_path)
+            flow_logger.log_flow_end()
             self.notifier.send_daily_report(report)
-            
             print("\n" + "=" * 70)
             print("✅ 每日分析完成！")
             print(f"📄 报告已保存: {report_path}")
             print("=" * 70)
-            
-            # 显示报告摘要
             print("\n" + report.to_text())
-            
             return report
-            
         except Exception as e:
             print(f"\n❌ 错误: {e}")
             import traceback
@@ -210,10 +233,12 @@ class ReishiV5:
         "決策引擎",
     )
 
-    def run_daily_for_backtest(self, as_of_date, backtest_start=None, quick: bool = False, full_universe: bool = False, silent: bool = True, on_progress=None, on_llm_progress=None, on_ticker=None, report_dir=None):
+    def run_daily_for_backtest(self, as_of_date, backtest_start=None, quick: bool = False, full_universe: bool = False, silent: bool = True, on_progress=None, on_llm_progress=None, on_ticker=None, on_step_activity=None, flow_logger=None, report_dir=None):
         """
         為回測跑單日 v5.0 流程：數據僅到 as_of_date（無偷看），回傳 (decision, all_analyses)。
-        report_dir 有值時會寫入細項報告 step_01..step_07 與數據來源、LLM 推理摘要。
+        flow_logger: 可選 FlowLogger，log 依流程圖一層層輸出（輸入層→第一層防護→五大 AI→第二層防護→結果）。
+        on_step_activity / on_ticker 仍會呼叫（若未提供 flow_logger 則靠其輸出）。
+        report_dir 有值時會寫入細項報告 step_01..step_07。
         """
         from datetime import timedelta
         from reporting.step_report import write_step_report
@@ -223,34 +248,131 @@ class ReishiV5:
         def _prog(i, name, pct=100):
             if callable(on_progress):
                 on_progress(i, total_steps, name, pct)
+        def _activity(step_i, msg):
+            if callable(on_step_activity):
+                on_step_activity(step_i, msg)
+        def _on_ticker_wrap(t, i, n):
+            if flow_logger:
+                flow_logger.log_layer1_fetch(t, i, n)
+            if callable(on_ticker):
+                on_ticker(t, i, n)
+        def _on_llm_wrap(phase, total, message, provider=None):
+            if flow_logger:
+                flow_logger.log_layer2_llm_phase(phase, total, message, provider)
+            if callable(on_llm_progress):
+                on_llm_progress(phase, total, message, provider)
 
         start_d = (backtest_start if backtest_start else (as_of_date - timedelta(days=90)) if hasattr(as_of_date, "day") else None)
         end_str = as_of_date.strftime("%Y-%m-%d") if hasattr(as_of_date, "strftime") else as_of_date
         start_str = start_d.strftime("%Y-%m-%d") if start_d and hasattr(start_d, "strftime") else None
+        tickers_to_fetch = self._get_scan_tickers(quick=quick, full_universe=full_universe)
+        # 即時新聞：Finnhub（回測時用 as_of_date 區間，不偷看未來）
+        from utils.news_fetcher import fetch_news_for_tickers, to_news_objects
+        to_date_news = end_str
+        from_date_news = (as_of_date - timedelta(days=7)).strftime("%Y-%m-%d") if hasattr(as_of_date, "strftime") else to_date_news
+        all_news_raw, news_by_ticker_raw = fetch_news_for_tickers(tickers_to_fetch, from_date_news, to_date_news)
+        all_news_for_causal = to_news_objects(all_news_raw)
+        news_by_ticker_for_sentiment = {t: to_news_objects(news_by_ticker_raw.get(t, [])) for t in tickers_to_fetch}
+        if all_news_raw:
+            news_desc = f"已載入 {len(all_news_raw)} 筆（Finnhub，{from_date_news}～{to_date_news}）"
+        else:
+            try:
+                from config import FINNHUB_API_KEY
+                news_desc = "0 筆（該區間無資料）" if (FINNHUB_API_KEY or os.getenv("FINNHUB_API_KEY")) else "0 筆（未設定 FINNHUB_API_KEY）"
+            except Exception:
+                news_desc = "0 筆（未設定 FINNHUB_API_KEY）"
+        if flow_logger:
+            # 輸入層：你的狀態 → 市場數據 → 即時新聞 → 霊視記憶
+            your_state = f"現金 {self.portfolio.cash:,.0f}、持倉 {len(self.portfolio.positions)} 檔、總值 {self.portfolio.total_value:,.0f}"
+            market_data_desc = f"掃描標的 {len(tickers_to_fetch)} 檔（{', '.join(tickers_to_fetch[:8])}{' ...' if len(tickers_to_fetch) > 8 else ''}）"
+            try:
+                mem_stats = self.memory.get_statistics()
+                memory_desc = f"已載入，歷史建議 {mem_stats.get('total_recommendations', 0)} 筆、已執行 {mem_stats.get('executed', 0)}、已完成 {mem_stats.get('completed', 0)}"
+            except Exception:
+                memory_desc = "已載入"
+            flow_logger.log_input_layer(your_state, market_data_desc, news_desc, memory_desc, as_of_date=end_str, mode="回測（數據截至當日）")
         if not silent:
             print(f"   [回測日] 數據截至 {end_str}")
-        market_data, data_source = self._fetch_and_validate_data(end_date=as_of_date, start_date=start_d, quick=quick, full_universe=full_universe, silent=silent, on_ticker=on_ticker)
+        # 細項 1：取數 — 第一層防護：數據驗證
+        _prog(1, "取數", 0)
+        _activity(1, "開始從數據源拉取歷史 K 線…")
+        market_data, data_source = self._fetch_and_validate_data(end_date=as_of_date, start_date=start_d, quick=quick, full_universe=full_universe, silent=silent, on_ticker=_on_ticker_wrap)
+        if flow_logger:
+            flow_logger.log_layer1_start(data_source)
+            flow_logger.log_layer1_result(len(market_data), list(market_data.keys()), data_source=data_source)
+        _activity(1, f"取數完成，共 {len(market_data)} 檔有效數據")
         _prog(1, "取數", 100)
         if report_dir:
             write_step_report(report_dir, 1, flow_steps[0], short_names[0], data_source=data_source)
-        tickers = list(market_data.keys()) or self._get_scan_tickers(quick=quick, full_universe=full_universe)
-        pattern_analysis = self.pattern_recognition.scan_all(tickers, market_data)
+        tickers = list(market_data.keys()) or tickers_to_fetch
+        # 五大 AI 方向分析層
+        if flow_logger:
+            flow_logger.log_ai_layer_start()
+        # 細項 2：圖表型態識別
+        _prog(2, "圖形掃描", 0)
+        _activity(2, f"開始掃描 {len(tickers)} 檔圖表型態（突破、VCP 等）…")
+        if flow_logger:
+            flow_logger.log_ai_2_start(len(tickers))
+        pattern_analysis = self.pattern_recognition.scan_all(
+            tickers, market_data,
+            on_ticker=lambda t, i, n: (flow_logger.log_ai_2_fetch(t, i, n) if flow_logger else None, _activity(2, f"正在掃描 {t} ({i}/{n}) …") if callable(on_step_activity) else None)
+        )
+        if flow_logger:
+            flow_logger.log_ai_2_result(len(pattern_analysis), [getattr(c, "ticker", "") for c in pattern_analysis] if pattern_analysis else None)
+        _activity(2, f"圖形掃描完成，候選數 {len(pattern_analysis)}")
         _prog(2, "圖形掃描", 100)
         if report_dir:
             write_step_report(report_dir, 2, flow_steps[1], short_names[1])
-        causal_analysis = self.causal_reasoning.analyze_all(news=[], portfolio=self.portfolio.positions)
+        # 細項 3：因果推理（傳入即時新聞）
+        _prog(3, "因果分析", 0)
+        _activity(3, "因果推理：分析新聞影響與持倉風險…")
+        if flow_logger:
+            flow_logger.log_ai_3_start()
+        causal_analysis = self.causal_reasoning.analyze_all(news=all_news_for_causal, portfolio=self.portfolio.positions)
+        if flow_logger:
+            flow_logger.log_ai_3_result()
+        _activity(3, "因果分析完成")
         _prog(3, "因果分析", 100)
         if report_dir:
             write_step_report(report_dir, 3, flow_steps[2], short_names[2])
-        sentiment_analysis = self.sentiment_analyzer.analyze_batch(tickers)
+        # 細項 4：情緒分析（傳入即時新聞 by ticker）
+        _prog(4, "情緒分析", 0)
+        _activity(4, f"開始對 {len(tickers)} 檔做情緒分析…")
+        if flow_logger:
+            flow_logger.log_ai_4_start(len(tickers))
+        sentiment_analysis = self.sentiment_analyzer.analyze_batch(
+            tickers,
+            on_ticker=lambda t, i, n: (flow_logger.log_ai_4_fetch(t, i, n) if flow_logger else None, _activity(4, f"正在分析 {t} ({i}/{n}) …") if callable(on_step_activity) else None),
+            news_by_ticker=news_by_ticker_for_sentiment,
+        )
+        if flow_logger:
+            flow_logger.log_ai_4_result()
+        _activity(4, "情緒分析完成")
         _prog(4, "情緒分析", 100)
         if report_dir:
             write_step_report(report_dir, 4, flow_steps[3], short_names[3])
+        # 細項 5：Multi-Agent 協作分析
+        _prog(5, "多智能體", 0)
+        _activity(5, "多智能體：彙總候選與市場數據、產出共識…")
+        if flow_logger:
+            flow_logger.log_ai_5_start(len(pattern_analysis))
         multi_agent_analysis = self.multi_agent.analyze_all(candidates=pattern_analysis, data=market_data)
+        if flow_logger:
+            flow_logger.log_ai_5_result()
+        _activity(5, "多智能體分析完成")
         _prog(5, "多智能體", 100)
         if report_dir:
             write_step_report(report_dir, 5, flow_steps[4], short_names[4])
+        # 細項 6：霊視記憶參考
+        _prog(6, "記憶洞察", 0)
+        _activity(6, "霊視記憶：查詢歷史案例、提取洞察…")
+        if flow_logger:
+            flow_logger.log_ai_6_start()
         memory_insights = self.memory.get_insights_for_candidates(pattern_analysis)
+        if flow_logger:
+            n_insights = len(memory_insights.get("insights", [])) if isinstance(memory_insights, dict) else 0
+            flow_logger.log_ai_6_result(n_insights)
+        _activity(6, "記憶洞察完成")
         _prog(6, "記憶洞察", 100)
         if report_dir:
             write_step_report(report_dir, 6, flow_steps[5], short_names[5])
@@ -261,10 +383,19 @@ class ReishiV5:
             multi_agent=multi_agent_analysis,
             memory=memory_insights,
         )
+        # 細項 7：決策引擎 — 第二層防護：LLM 防幻覺
         _prog(7, "決策引擎（LLM 決策中…）", 0)
+        _activity(7, "決策引擎：組裝 prompt、呼叫 LLM（防幻覺 + 自我質疑）…")
+        if flow_logger:
+            flow_logger.log_layer2_start()
         decision = self.decision_engine.decide(
-            state=self.portfolio, analyses=all_analyses, on_llm_progress=on_llm_progress
+            state=self.portfolio, analyses=all_analyses, on_llm_progress=_on_llm_wrap
         )
+        if flow_logger and decision:
+            acts = getattr(decision, "actions", []) or []
+            summary = ", ".join([f"{getattr(a, 'action', '')} {getattr(a, 'ticker', '')}" for a in acts[:3]]) if acts else "無操作"
+            flow_logger.log_layer2_result(len(acts), summary)
+        _activity(7, "決策引擎完成，已解析行動與持倉建議")
         _prog(7, "決策引擎", 100)
         llm_reasoning = ""
         if decision and getattr(decision, "actions", None):
@@ -276,6 +407,9 @@ class ReishiV5:
             llm_reasoning = "\n\n".join(parts) if parts else "（無具體推理文字）"
         if report_dir:
             write_step_report(report_dir, 7, flow_steps[6], short_names[6], llm_reasoning=llm_reasoning)
+        if flow_logger and report_dir:
+            flow_logger.log_report_start(report_dir)
+            flow_logger.log_flow_end()
         return decision, all_analyses
     
     def _get_scan_tickers(self, quick: bool = False, full_universe: bool = False):
@@ -443,6 +577,8 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, quick: bool = Fal
             )
             flow_steps = getattr(ReishiV5, "FLOW_STEPS", ("數據獲取與驗證", "圖表型態識別", "因果推理", "情緒分析", "Multi-Agent 協作分析", "霊視記憶參考", "決策引擎"))
             daily_report_dir = os.path.join(output_dir, f"daily_{T.strftime('%Y-%m-%d')}")
+            from reporting.flow_logger import FlowLogger
+            flow_logger = FlowLogger(flush_each=True)
             def _on_progress(step_i, total, name, pct):
                 flow_label = f"[Flow 步驟 {step_i}] {flow_steps[step_i - 1]}" if 1 <= step_i <= len(flow_steps) else ""
                 elapsed = time.time() - day_start
@@ -460,6 +596,9 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, quick: bool = Fal
                     print(msg, flush=True)
             def _on_ticker(ticker, idx, total):
                 print(f"    [Flow 步驟 1] 數據獲取: 正在取得 {ticker} ({idx}/{total}) …", flush=True)
+            def _on_step_activity(step_i, message):
+                flow_name = flow_steps[step_i - 1] if 1 <= step_i <= len(flow_steps) else ""
+                print(f"    細項 {step_i}/7 {flow_name}: {message}", flush=True)
             def _on_llm_progress(phase, total, message, provider=None):
                 if provider:
                     print(f"    決策引擎 LLM 第 {phase}/{total} 次（{message}）完成，使用 {provider}", flush=True)
@@ -469,6 +608,8 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, quick: bool = Fal
                 decision, all_analyses = reishi.run_daily_for_backtest(
                     prev_d, backtest_start_eff, quick=quick, full_universe=full_universe, silent=True,
                     on_progress=_on_progress, on_llm_progress=_on_llm_progress, on_ticker=_on_ticker,
+                    on_step_activity=_on_step_activity,
+                    flow_logger=flow_logger,
                     report_dir=daily_report_dir,
                 )
             except Exception as e:

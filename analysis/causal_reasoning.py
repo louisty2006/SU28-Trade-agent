@@ -66,9 +66,9 @@ class CausalReasoning:
         )
     
     def analyze_all(self, news, portfolio):
-        """完整因果分析"""
+        """完整因果分析。news 為即時新聞列表（News 或 dict），有則傳入分析。"""
         return {
             'summary': '因果推理分析完成',
-            'impact': self.analyze_news_impact(None, portfolio) if news else None,
+            'impact': self.analyze_news_impact(news, portfolio) if news else None,
             'risk': self.analyze_portfolio_risk(portfolio)
         }
