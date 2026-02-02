@@ -386,7 +386,20 @@ class ReishiV5:
             flow_logger.log_ai_3_start(data_sources="即時新聞（Finnhub）、持倉（本地）；LLM 因果鏈（四角）")
         causal_analysis = self.causal_reasoning.analyze_all(news=all_news_for_causal, portfolio=self.portfolio.positions)
         if flow_logger:
-            flow_logger.log_ai_3_result()
+            causal_lines = []
+            if isinstance(causal_analysis, dict):
+                s = causal_analysis.get("summary")
+                if s:
+                    causal_lines.append(s[:66])
+                risk = causal_analysis.get("risk")
+                if risk is not None and getattr(risk, "diversification_score", None) is not None:
+                    causal_lines.append(f"分散化得分：{risk.diversification_score:.2f}")
+                impact = causal_analysis.get("impact")
+                if impact is not None:
+                    chain = getattr(impact, "causal_chain", None) or getattr(impact, "suggested_action", "")
+                    if chain:
+                        causal_lines.append((str(chain))[:66])
+            flow_logger.log_ai_3_result(causal_lines if causal_lines else None)
         _activity(3, "因果分析完成")
         _prog(3, "因果分析", 100)
         if report_dir:
@@ -402,7 +415,20 @@ class ReishiV5:
             news_by_ticker=news_by_ticker_for_sentiment,
         )
         if flow_logger:
-            flow_logger.log_ai_4_result()
+            sentiment_lines = []
+            if isinstance(sentiment_analysis, dict):
+                for ticker, res in list(sentiment_analysis.items())[:5]:
+                    score = getattr(res, "score", None)
+                    conf = getattr(res, "confidence", None)
+                    factors = getattr(res, "key_factors", []) or []
+                    fstr = (factors[0][:20] + "…") if factors else "—"
+                    if score is not None:
+                        part = f"  {ticker}: 分數 {score:.2f}"
+                        if conf is not None:
+                            part += f" (信心 {conf:.2f})"
+                        part += f" {fstr}"
+                        sentiment_lines.append(part[:66])
+            flow_logger.log_ai_4_result(sentiment_lines if sentiment_lines else None)
         _activity(4, "情緒分析完成")
         _prog(4, "情緒分析", 100)
         if report_dir:
@@ -414,7 +440,16 @@ class ReishiV5:
             flow_logger.log_ai_5_start(len(pattern_analysis), data_sources="圖表候選（步驟 2）、市場數據（步驟 1）；LLM 四角（Scitely/Cohere/Mistral/OpenRouter）")
         multi_agent_analysis = self.multi_agent.analyze_all(candidates=pattern_analysis, data=market_data)
         if flow_logger:
-            flow_logger.log_ai_5_result()
+            multi_lines = []
+            if isinstance(multi_agent_analysis, dict):
+                s = multi_agent_analysis.get("summary")
+                if s:
+                    multi_lines.append(s[:66])
+                for k in ("consensus_action", "consensus_score", "final_recommendation"):
+                    v = multi_agent_analysis.get(k)
+                    if v is not None:
+                        multi_lines.append(f"  {k}: {str(v)[:60]}")
+            flow_logger.log_ai_5_result(multi_lines if multi_lines else None)
         _activity(5, "多智能體分析完成")
         _prog(5, "多智能體", 100)
         if report_dir:
@@ -427,7 +462,14 @@ class ReishiV5:
         memory_insights = self.memory.get_insights_for_candidates(pattern_analysis)
         if flow_logger:
             n_insights = len(memory_insights.get("insights", [])) if isinstance(memory_insights, dict) else 0
-            flow_logger.log_ai_6_result(n_insights)
+            insight_preview = []
+            if isinstance(memory_insights, dict):
+                for ins in (memory_insights.get("insights") or [])[:2]:
+                    if isinstance(ins, dict):
+                        insight_preview.append((ins.get("summary") or ins.get("text") or str(ins))[:66])
+                    else:
+                        insight_preview.append(str(ins)[:66])
+            flow_logger.log_ai_6_result(n_insights, insight_preview if insight_preview else None)
         _activity(6, "記憶洞察完成")
         _prog(6, "記憶洞察", 100)
         if report_dir:

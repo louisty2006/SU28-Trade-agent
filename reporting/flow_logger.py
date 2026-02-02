@@ -145,8 +145,12 @@ class FlowLogger:
         self._box("  [3/5] 因果推理", body)
         self._arrow()
 
-    def log_ai_3_result(self):
-        self._box("  [3/5] 因果推理 — 結果", ["產出：影響鏈、風險摘要、建議動作"])
+    def log_ai_3_result(self, summary_lines: Optional[List[str]] = None):
+        """結果可傳入實際產出摘要（每行會依框寬截斷）"""
+        body = ["產出：影響鏈、風險摘要、建議動作"]
+        if summary_lines:
+            body.extend(summary_lines)
+        self._box("  [3/5] 因果推理 — 結果", body)
         self._arrow()
 
     def log_ai_4_start(self, ticker_count: int, data_sources: str = ""):
@@ -163,8 +167,12 @@ class FlowLogger:
     def log_ai_4_fetch(self, ticker: str, index: int, total: int):
         self._out(f"    {_BOX_MID} 正在分析 {ticker} ({index}/{total}) …")
 
-    def log_ai_4_result(self):
-        self._box("  [4/5] 情緒分析 — 結果", ["產出：各標的情緒分數與風險清單"])
+    def log_ai_4_result(self, summary_lines: Optional[List[str]] = None):
+        """結果可傳入實際產出摘要（每行會依框寬截斷）"""
+        body = ["產出：各標的情緒分數與風險清單"]
+        if summary_lines:
+            body.extend(summary_lines)
+        self._box("  [4/5] 情緒分析 — 結果", body)
         self._arrow()
 
     def log_ai_5_start(self, candidate_count: int, data_sources: str = ""):
@@ -178,8 +186,12 @@ class FlowLogger:
         self._box("  [5/5] Multi-Agent 協作分析", body)
         self._arrow()
 
-    def log_ai_5_result(self):
-        self._box("  [5/5] Multi-Agent — 結果", ["產出：共識評分、共識動作、最終建議"])
+    def log_ai_5_result(self, summary_lines: Optional[List[str]] = None):
+        """結果可傳入實際產出摘要（每行會依框寬截斷）"""
+        body = ["產出：共識評分、共識動作、最終建議"]
+        if summary_lines:
+            body.extend(summary_lines)
+        self._box("  [5/5] Multi-Agent — 結果", body)
         self._arrow()
 
     def log_ai_6_start(self, data_sources: str = ""):
@@ -192,8 +204,12 @@ class FlowLogger:
         self._box("  [6] 霊視記憶參考", body)
         self._arrow()
 
-    def log_ai_6_result(self, insight_count: int = 0):
-        self._box("  [6] 霊視記憶參考 — 結果", [f"產出：{insight_count} 條洞察、歷史摘要"])
+    def log_ai_6_result(self, insight_count: int = 0, insight_preview: Optional[List[str]] = None):
+        """結果可傳入洞察預覽（每行會依框寬截斷）"""
+        body = [f"產出：{insight_count} 條洞察、歷史摘要"]
+        if insight_preview:
+            body.extend(insight_preview)
+        self._box("  [6] 霊視記憶參考 — 結果", body)
         self._arrow()
 
     # ---------- 第二層防護：LLM 防幻覺 ----------
