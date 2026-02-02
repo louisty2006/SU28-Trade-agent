@@ -5,3 +5,7 @@ __pycache__/
 .DS_Store
 reports/
 config.json
+config.yaml
+*.db
+*.sqlite
+*.sqlite3
