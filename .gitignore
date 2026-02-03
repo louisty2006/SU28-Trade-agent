@@ -11,3 +11,4 @@ config.yaml
 *.sqlite3
 debug_run.log
 .cursor/debug.log
+data/market_data/

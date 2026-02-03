@@ -4,6 +4,12 @@ REISHI v5.1.2 - 本地數據管理
 - K 線：data/market_data/us_stocks/YYYY.parquet + metadata.json
 - 新聞：data/news_data/ + metadata.json（GDELT/SEC/CommonCrawl 等）
 - 狀態檢查、修復、下載、驗證、清理
+
+約定（保證行為）：
+- 所有下載與續跑都寫入「同一個資料夾」：專案根目錄下的 data/market_data/us_stocks/
+- 按年份存檔：每年一個檔案，檔名為 YYYY.parquet（如 2005.parquet、2024.parquet）
+- 中斷後再執行 [B] 或該年修復，會從既有 partial 繼續，不會另建資料夾或覆蓋其他年份
+- 回測選「本地數據」時，從同一資料夾依年份讀取，使用數據應順利無誤
 """
 from __future__ import annotations
 
@@ -46,6 +52,9 @@ def _debug_log(payload):
     if payload.get("tag") in _print_tags:
         try:
             import sys
+            # 先換行結束當前的 \r 進度列，否則 write_partial_ok 會被下一次進度覆蓋
+            sys.stdout.write("\n")
+            sys.stdout.flush()
             tag = payload.get("tag", "log")
             short = line[:200] + "..." if len(line) > 200 else line
             sys.stdout.write(f"[REISHI {tag}] {short}\n")
@@ -140,8 +149,10 @@ def save_market_metadata(meta: dict):
 def get_kline_status() -> List[YearStatus]:
     """
     掃描 data/market_data/us_stocks/*.parquet 與 metadata，回傳每年狀態。
-    狀態：complete（完整）、partial（部分）、none（無）
+    狀態：complete（完整）、partial（部分）、none（無）。
+    會先 _resolve_data_roots() 以確保讀取路徑與下載一致，令「上次已下載」立刻反映在表上。
     """
+    _resolve_data_roots()
     expected = get_universe_count()
     meta = get_market_metadata()
     years_meta = meta.get("years", {})
@@ -230,6 +241,14 @@ def format_kline_table(rows: List[YearStatus]) -> str:
     return "\n".join(lines)
 
 
+def _print_kline_status_refresh():
+    """重新讀取 K 線狀態並列印表格，令用家立刻看到最新狀態（下載後或上次已下載）。"""
+    status = get_kline_status()
+    print()
+    print(format_kline_table(status))
+    print()
+
+
 def format_news_table(rows: List[Dict[str, Any]]) -> str:
     """輸出新聞狀態表格字串"""
     lines = []
@@ -248,8 +267,9 @@ def format_news_table(rows: List[Dict[str, Any]]) -> str:
 def check_data_sufficient(start_date: date, end_date: date) -> Tuple[bool, str, List[YearStatus]]:
     """
     檢查 [start_date, end_date] 區間內本地 K 線數據是否足夠。
-    回傳 (是否足夠, 訊息, 相關年份狀態列表)
+    讀取路徑與下載一致：data/market_data/us_stocks/。回傳 (是否足夠, 訊息, 相關年份狀態列表)。
     """
+    _resolve_data_roots()
     # #region agent log
     _debug_log({"location": "data_manager.py:check_data_sufficient", "message": "entry", "data": {"start": str(start_date), "end": str(end_date)}, "timestamp": int(__import__("time").time() * 1000), "sessionId": "debug-session", "hypothesisId": "H2"})
     # #endregion
@@ -324,6 +344,12 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
     """
     _resolve_data_roots()
     _ensure_dirs()
+    parquet_engine, parquet_err = _get_parquet_engine()
+    if parquet_engine is None:
+        if callable(on_progress):
+            _invoke_progress(on_progress, "", False)
+        print(f"\n❌ {parquet_err}\n")
+        return False
     # 運行證據：路徑與是否存在 partial，用於排查續跑不生效
     _out_path = os.path.join(MARKET_STOCKS_DIR, f"{year}.parquet")
     _debug_log({
@@ -358,7 +384,7 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
     have = set()
     if os.path.isfile(out_path):
         try:
-            existing_df = pd.read_parquet(out_path)
+            existing_df = pd.read_parquet(out_path, engine=parquet_engine)
             # 支援 symbol 或 ticker 欄位，方便與既有 parquet 相容
             if "symbol" not in existing_df.columns and "ticker" in existing_df.columns:
                 existing_df = existing_df.copy()
@@ -438,14 +464,14 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
                             _invoke_progress(on_progress, line, True)
                         # 前 50 檔每次成功都寫入，之後每 50 檔寫一次，確保中斷後一定可續跑
                         if len(rows) <= 50 or len(rows) % _checkpoint_every == 0:
-                            _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress)
+                            _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress, parquet_engine)
                     else:
                         failed_tickers.append(ticker)
             except KeyboardInterrupt:
                 if rows or (existing_df is not None and not existing_df.empty):
                     if callable(on_progress):
                         _invoke_progress(on_progress, "  中斷前寫入進度…", False)
-                    _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress)
+                    _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress, parquet_engine)
                 raise
         # 補下載：失敗的改為順序重試一次，間隔 _retry_delay_sec，避免第三方限流後立刻再打
         rows_before_retry = len(rows)
@@ -463,7 +489,7 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
                     if callable(on_progress):
                         _invoke_progress(on_progress, f"  補下載成功: {t}", False)
                     if len(rows) % _checkpoint_every == 0:
-                        _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress)
+                        _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress, parquet_engine)
             except Exception:
                 pass
         still_failed = len(failed_tickers) - (len(rows) - rows_before_retry)
@@ -481,7 +507,7 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
     combined = _concat_existing_and_rows(existing_df, rows)
     if combined is None or combined.empty:
         return True
-    combined.to_parquet(out_path, index=False)
+    combined.to_parquet(out_path, index=False, engine=parquet_engine)
     size_mb = os.path.getsize(out_path) / (1024 * 1024)
     uniq_col = "symbol" if "symbol" in combined.columns else "ticker"
     stocks_in_file = int(combined[uniq_col].nunique())
@@ -516,8 +542,8 @@ def _concat_existing_and_rows(existing_df, rows):
     return out
 
 
-def _write_partial(year: str, existing_df, rows, out_path, start_d, end_d, on_progress):
-    """每 50 檔寫入一次 partial parquet，中斷後下次可續跑；另在滿 1、10 檔時也會寫入。"""
+def _write_partial(year: str, existing_df, rows, out_path, start_d, end_d, on_progress, engine: str = "pyarrow"):
+    """每 50 檔寫入一次 partial parquet，中斷後下次可續跑；另在滿 1、10 檔時也會寫入。engine 由 repair_or_download_year 傳入。"""
     _ensure_dirs()
     out_path = os.path.abspath(out_path)
     combined = _concat_existing_and_rows(existing_df, rows)
@@ -527,12 +553,21 @@ def _write_partial(year: str, existing_df, rows, out_path, start_d, end_d, on_pr
     tmp_path = out_path + ".tmp"
     n_stocks = int(combined["symbol"].nunique()) if "symbol" in combined.columns else 0
     try:
-        combined.to_parquet(tmp_path, index=False)
+        combined.to_parquet(tmp_path, index=False, engine=engine)
         if os.path.isfile(tmp_path):
             os.replace(tmp_path, out_path)
         _debug_log({"tag": "write_partial_ok", "year": year, "path": out_path, "n_stocks": n_stocks, "size_bytes": os.path.getsize(out_path)})
     except Exception as e:
+        global _pyarrow_hint_printed
         _debug_log({"tag": "write_partial_fail", "year": year, "path": out_path, "n_stocks": n_stocks, "error": str(e)})
+        if not _pyarrow_hint_printed and ("Unable to find a usable engine" in str(e) or "pyarrow" in str(e).lower()):
+            _pyarrow_hint_printed = True
+            try:
+                import sys
+                sys.stdout.write("\n  ⚠ 寫入 Parquet 需要 pyarrow，請執行: pip install pyarrow\n")
+                sys.stdout.flush()
+            except Exception:
+                pass
         try:
             if os.path.isfile(tmp_path):
                 os.remove(tmp_path)
@@ -569,6 +604,24 @@ def _write_partial(year: str, existing_df, rows, out_path, start_d, end_d, on_pr
 
 # 進度列單行最大寬度，避免 \r 覆蓋時換行殘影
 PROGRESS_LINE_WIDTH = 100
+
+# 僅列印一次 pyarrow 安裝提示，避免洗版
+_pyarrow_hint_printed = False
+
+
+def _get_parquet_engine() -> Tuple[Optional[str], Optional[str]]:
+    """回傳 (engine_name, None) 或 (None, error_message)。優先 pyarrow，其次 fastparquet。"""
+    try:
+        import pyarrow  # noqa: F401
+        return ("pyarrow", None)
+    except ImportError:
+        pass
+    try:
+        import fastparquet  # noqa: F401
+        return ("fastparquet", None)
+    except ImportError:
+        pass
+    return (None, "請先安裝 Parquet 引擎：pip install pyarrow  或  pip install fastparquet")
 
 
 def _invoke_progress(on_progress, msg: str, same_line: bool):
@@ -679,6 +732,7 @@ def run_data_management_ui():
             for y in to_repair:
                 print(f"  修復 {y}...")
                 repair_or_download_year(y, on_progress=lambda msg: print(f"    {msg}"))
+            _print_kline_status_refresh()
             continue
         if choice in "123456789" or (len(choice) == 2 and choice.isdigit()):
             # 單鍵 1-9 => 2005-2013；兩位數 14,24 => 2014, 2024
@@ -692,6 +746,7 @@ def run_data_management_ui():
                 continue
             print(f"下載/修復年份 {year_full}")
             repair_or_download_year(year_full, on_progress=lambda msg: print(f"  {msg}"))
+            _print_kline_status_refresh()
             continue
         if choice == "A":
             r = input("輸入年份範圍（例 2020 2023）: ").strip().split()
@@ -702,6 +757,7 @@ def run_data_management_ui():
                         repair_or_download_year(str(y), on_progress=lambda m: print(f"  {m}"))
                 except ValueError:
                     print("請輸入兩個整數年份")
+            _print_kline_status_refresh()
             continue
         if choice == "B":
             print("下載 2005-2025 共 21 年，耗時較長")
@@ -725,13 +781,17 @@ def run_data_management_ui():
                             print(flush=True)
                 print(f"  [{idx}/{n_years}] 開始年份 {y} …", flush=True)
                 repair_or_download_year(str(y), on_progress=_progress)
+                # 該年完成後立刻更新狀態表，令用家隨時看到最新年份/狀態/股票數/完整度
+                _print_kline_status_refresh()
             print("  全部 21 年下載完成。", flush=True)
+            _print_kline_status_refresh()
             continue
         if choice == "C":
             from datetime import date as dt_date
             y = str(dt_date.today().year)
             print(f"更新至最新（{y} 年）...")
             repair_or_download_year(y, on_progress=lambda m: print(f"  {m}"))
+            _print_kline_status_refresh()
             continue
         if choice == "D":
             issues = validate_integrity()
@@ -740,6 +800,7 @@ def run_data_management_ui():
             else:
                 for i in issues:
                     print(f"  ⚠ {i}")
+            _print_kline_status_refresh()
             continue
         if choice == "E":
             removed = cleanup_corrupted()
@@ -747,6 +808,7 @@ def run_data_management_ui():
                 print("無損壞檔案需清理")
             else:
                 print("已刪除:", removed)
+            _print_kline_status_refresh()
             continue
         print("無效選項，請重新輸入")
 
@@ -754,9 +816,11 @@ def run_data_management_ui():
 def read_local_market_data_for_date(trading_date: date, tickers: List[str], lookback_days: int = 90) -> Optional[dict]:
     """
     從本地 parquet 讀取某日所需的 K 線（trading_date 前 lookback_days 至 trading_date）。
+    讀取路徑與下載／續跑一致：data/market_data/us_stocks/YYYY.parquet（依專案根目錄）。
     回傳 { ticker: DataFrame }，格式與 DataFetcher 一致（index=Date, columns Open/High/Low/Close/Volume）。
     若本地無數據則回傳 None。
     """
+    _resolve_data_roots()
     # #region agent log
     _debug_log({"location": "data_manager.py:read_local", "message": "entry", "data": {"trading_date": str(trading_date), "tickers_count": len(tickers), "lookback_days": lookback_days}, "timestamp": int(__import__("time").time() * 1000), "sessionId": "debug-session", "hypothesisId": "H5"})
     # #endregion

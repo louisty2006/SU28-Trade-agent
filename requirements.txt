@@ -3,6 +3,7 @@
 # 核心數據處理
 pandas>=2.0.0
 numpy>=1.24.0
+pyarrow>=14.0.0   # Parquet 讀寫（數據管理 K 線存檔／續跑）
 
 # 股票數據
 yfinance>=0.2.28
