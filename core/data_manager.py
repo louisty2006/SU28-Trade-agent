@@ -1,5 +1,5 @@
 """
-REISHI v5.1 - 本地數據管理
+REISHI v5.1.2 - 本地數據管理
 
 - K 線：data/market_data/us_stocks/YYYY.parquet + metadata.json
 - 新聞：data/news_data/ + metadata.json（GDELT/SEC/CommonCrawl 等）
@@ -13,20 +13,63 @@ from datetime import datetime, date
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 
-# 專案根目錄
+# 專案根目錄：若當前工作目錄為專案根（有 main_v5.py 與 core/），用 cwd 讓資料寫入執行目錄
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+try:
+    _cwd = os.getcwd()
+    if os.path.isfile(os.path.join(_cwd, "main_v5.py")) and os.path.isdir(os.path.join(_cwd, "core")):
+        _PROJECT_ROOT = os.path.abspath(_cwd)
+except Exception:
+    pass
 _DEBUG_LOG_PATH = os.path.join(_PROJECT_ROOT, ".cursor", "debug.log")
 _DEBUG_LOG_FALLBACK = os.path.join(_PROJECT_ROOT, "debug_run.log")
 
 def _debug_log(payload):
-    """寫入兩處 log（.cursor/debug.log 與專案根 debug_run.log）。"""
+    """寫入兩處 log（.cursor/debug.log 與專案根 debug_run.log），並列印一行到 stdout 以保留運行證據。"""
+    line = json.dumps(payload, ensure_ascii=False)
     for _path in (_DEBUG_LOG_PATH, _DEBUG_LOG_FALLBACK):
         try:
             os.makedirs(os.path.dirname(_path), exist_ok=True)
             with open(_path, "a", encoding="utf-8") as _f:
-                _f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                _f.write(line + "\n")
+                _f.flush()
+        except Exception as e:
+            # 寫檔失敗時至少列印，方便排查路徑/權限
+            try:
+                import sys
+                sys.stdout.write(f"[REISHI debug_log write failed {_path!r}: {e}\n")
+                sys.stdout.flush()
+            except Exception:
+                pass
+    # 僅對關鍵 tag 列印到 stdout，確保續跑排查有運行證據
+    _print_tags = ("repair_start", "resume_load_ok", "resume_load_fail", "write_partial_ok", "write_partial_fail")
+    if payload.get("tag") in _print_tags:
+        try:
+            import sys
+            tag = payload.get("tag", "log")
+            short = line[:200] + "..." if len(line) > 200 else line
+            sys.stdout.write(f"[REISHI {tag}] {short}\n")
+            sys.stdout.flush()
         except Exception:
             pass
+
+def _resolve_data_roots():
+    """依當前工作目錄更新資料路徑，確保與執行目錄一致。"""
+    global MARKET_DATA_DIR, MARKET_STOCKS_DIR, MARKET_METADATA_PATH, NEWS_DATA_DIR, NEWS_METADATA_PATH, UNIVERSE_PATH
+    root = _PROJECT_ROOT
+    try:
+        cwd = os.getcwd()
+        if os.path.isfile(os.path.join(cwd, "main_v5.py")) and os.path.isdir(os.path.join(cwd, "core")):
+            root = os.path.abspath(cwd)
+    except Exception:
+        pass
+    MARKET_DATA_DIR = os.path.join(root, "data", "market_data")
+    MARKET_STOCKS_DIR = os.path.join(MARKET_DATA_DIR, "us_stocks")
+    MARKET_METADATA_PATH = os.path.join(MARKET_DATA_DIR, "metadata.json")
+    NEWS_DATA_DIR = os.path.join(root, "data", "news_data")
+    NEWS_METADATA_PATH = os.path.join(NEWS_DATA_DIR, "metadata.json")
+    UNIVERSE_PATH = os.path.join(root, "data", "us_universe.csv")
+
 
 MARKET_DATA_DIR = os.path.join(_PROJECT_ROOT, "data", "market_data")
 MARKET_STOCKS_DIR = os.path.join(MARKET_DATA_DIR, "us_stocks")
@@ -279,7 +322,20 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
     - 並行下載：預設 8 緒同時下載，加快速度；失敗的標的會自動順序補下載一次（間隔 1s），仍失敗的留待下次續跑再試。
     中斷後（如 Ctrl+C）：直接再次執行同一年或 [B]，會從上次 partial 繼續。
     """
+    _resolve_data_roots()
     _ensure_dirs()
+    # 運行證據：路徑與是否存在 partial，用於排查續跑不生效
+    _out_path = os.path.join(MARKET_STOCKS_DIR, f"{year}.parquet")
+    _debug_log({
+        "tag": "repair_start",
+        "year": year,
+        "project_root": _PROJECT_ROOT,
+        "cwd": os.getcwd(),
+        "market_stocks_dir": MARKET_STOCKS_DIR,
+        "out_path": _out_path,
+        "out_path_exists": os.path.isfile(_out_path),
+        "out_path_abs": os.path.abspath(_out_path),
+    })
     import pandas as pd
     from datetime import date as date_type
     start_d = date_type(int(year), 1, 1)
@@ -309,12 +365,14 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
                 existing_df["symbol"] = existing_df["ticker"]
             if "symbol" in existing_df.columns:
                 have = set(existing_df["symbol"].unique())
+                _debug_log({"tag": "resume_load_ok", "year": year, "path": os.path.abspath(out_path), "have_count": len(have), "total": total})
                 # 年度續跑：已完整則跳過
                 if len(have) >= total * 0.99:
                     if callable(on_progress):
                         _invoke_progress(on_progress, f"{year} 已完整（{len(have)} 檔），跳過", False)
                     return True
-        except Exception:
+        except Exception as e:
+            _debug_log({"tag": "resume_load_fail", "year": year, "path": os.path.abspath(out_path), "error": str(e)})
             existing_df = None
             have = set()
     tickers_to_fetch = [t for t in tickers if t not in have]
@@ -362,25 +420,33 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
 
         with ThreadPoolExecutor(max_workers=_max_workers) as executor:
             futures = {executor.submit(_fetch_one, t): t for t in tickers_to_fetch}
-            for future in as_completed(futures):
-                ticker, df = future.result()
-                if df is not None:
-                    rows.append(df)
-                    downloaded_so_far = have_count + len(rows)
-                    remaining = total - downloaded_so_far
-                    pct = downloaded_so_far / total if total else 0
-                    filled = min(_bar_width, int(_bar_width * pct))
-                    bar = "[" + "#" * filled + "-" * (_bar_width - filled) + "]"
-                    pct_str = f"{pct*100:.1f}%" if pct < 0.01 else f"{pct*100:.0f}%"
-                    line = f"{bar} {pct_str} 已下載 {downloaded_so_far} 餘 {remaining} 當前:{ticker}"
-                    if len(line) > _max_line:
-                        line = line[:_max_line - 3] + "..."
+            try:
+                for future in as_completed(futures):
+                    ticker, df = future.result()
+                    if df is not None:
+                        rows.append(df)
+                        downloaded_so_far = have_count + len(rows)
+                        remaining = total - downloaded_so_far
+                        pct = downloaded_so_far / total if total else 0
+                        filled = min(_bar_width, int(_bar_width * pct))
+                        bar = "[" + "#" * filled + "-" * (_bar_width - filled) + "]"
+                        pct_str = f"{pct*100:.1f}%" if pct < 0.01 else f"{pct*100:.0f}%"
+                        line = f"{bar} {pct_str} 已下載 {downloaded_so_far} 餘 {remaining} 當前:{ticker}"
+                        if len(line) > _max_line:
+                            line = line[:_max_line - 3] + "..."
+                        if callable(on_progress):
+                            _invoke_progress(on_progress, line, True)
+                        # 前 50 檔每次成功都寫入，之後每 50 檔寫一次，確保中斷後一定可續跑
+                        if len(rows) <= 50 or len(rows) % _checkpoint_every == 0:
+                            _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress)
+                    else:
+                        failed_tickers.append(ticker)
+            except KeyboardInterrupt:
+                if rows or (existing_df is not None and not existing_df.empty):
                     if callable(on_progress):
-                        _invoke_progress(on_progress, line, True)
-                    if len(rows) % _checkpoint_every == 0:
-                        _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress)
-                else:
-                    failed_tickers.append(ticker)
+                        _invoke_progress(on_progress, "  中斷前寫入進度…", False)
+                    _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress)
+                raise
         # 補下載：失敗的改為順序重試一次，間隔 _retry_delay_sec，避免第三方限流後立刻再打
         rows_before_retry = len(rows)
         if failed_tickers and callable(on_progress):
@@ -451,11 +517,40 @@ def _concat_existing_and_rows(existing_df, rows):
 
 
 def _write_partial(year: str, existing_df, rows, out_path, start_d, end_d, on_progress):
-    """每 50 檔寫入一次 partial parquet，中斷後下次可續跑。"""
+    """每 50 檔寫入一次 partial parquet，中斷後下次可續跑；另在滿 1、10 檔時也會寫入。"""
+    _ensure_dirs()
+    out_path = os.path.abspath(out_path)
     combined = _concat_existing_and_rows(existing_df, rows)
     if combined is None or combined.empty:
+        _debug_log({"tag": "write_partial_skip", "year": year, "reason": "combined empty", "rows_len": len(rows) if rows else 0})
         return
-    combined.to_parquet(out_path, index=False)
+    tmp_path = out_path + ".tmp"
+    n_stocks = int(combined["symbol"].nunique()) if "symbol" in combined.columns else 0
+    try:
+        combined.to_parquet(tmp_path, index=False)
+        if os.path.isfile(tmp_path):
+            os.replace(tmp_path, out_path)
+        _debug_log({"tag": "write_partial_ok", "year": year, "path": out_path, "n_stocks": n_stocks, "size_bytes": os.path.getsize(out_path)})
+    except Exception as e:
+        _debug_log({"tag": "write_partial_fail", "year": year, "path": out_path, "n_stocks": n_stocks, "error": str(e)})
+        try:
+            if os.path.isfile(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        return
+    # 若當前工作目錄為專案根且與 out_path 不同，再寫一份到 cwd，確保終端所在目錄也有檔案
+    try:
+        import shutil
+        cwd = os.getcwd()
+        if os.path.isfile(os.path.join(cwd, "main_v5.py")) and os.path.isdir(os.path.join(cwd, "core")):
+            mirror_dir = os.path.join(cwd, "data", "market_data", "us_stocks")
+            if os.path.abspath(os.path.dirname(out_path)) != os.path.abspath(mirror_dir):
+                os.makedirs(mirror_dir, exist_ok=True)
+                mirror_path = os.path.join(mirror_dir, f"{year}.parquet")
+                shutil.copy2(out_path, mirror_path)
+    except Exception:
+        pass
     uniq_col = "symbol" if "symbol" in combined.columns else "ticker"
     n_stocks = int(combined[uniq_col].nunique())
     meta = get_market_metadata()
@@ -469,7 +564,7 @@ def _write_partial(year: str, existing_df, rows, out_path, start_d, end_d, on_pr
     }
     save_market_metadata(meta)
     if callable(on_progress):
-        _invoke_progress(on_progress, f"  → 已寫入 partial（{n_stocks} 檔）", False)
+        _invoke_progress(on_progress, f"  → 已寫入 partial（{n_stocks} 檔） {out_path}", False)
 
 
 # 進度列單行最大寬度，避免 \r 覆蓋時換行殘影
@@ -548,12 +643,13 @@ def cleanup_corrupted() -> List[str]:
 
 def run_data_management_ui():
     """數據管理選單：狀態表 + [F][1-9][A][B][C][D][E][0]"""
+    _resolve_data_roots()
     _ensure_dirs()
     while True:
         kline_status = get_kline_status()
         news_status = get_news_status()
         print("\n" + "=" * 60)
-        print("📁 REISHI v5.1 數據管理")
+        print("📁 REISHI v5.1.2 數據管理")
         print("=" * 60)
         print(format_kline_table(kline_status))
         print()
