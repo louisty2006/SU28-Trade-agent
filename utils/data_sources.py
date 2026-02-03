@@ -128,85 +128,102 @@ class YahooSource(DataSource):
         return hist[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']]
 
     def fetch_daily_bars(self, symbol: str, start: date, end: date) -> Optional[pd.DataFrame]:
-        """多層 fallback：start/end → 1mo+end → 3mo → 6mo，確保能拿到數據"""
-        try:
-            import yfinance as yf
-            stock = yf.Ticker(symbol)
-            end_inclusive = end + timedelta(days=1)
-            end_str = end_inclusive.isoformat()
+        """多層 fallback：start/end → 1mo+end → 3mo → 6mo，確保能拿到數據；失敗時重試 2 次（避免 yfinance 偶發無數據）"""
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                import yfinance as yf
+                stock = yf.Ticker(symbol)
+                end_inclusive = end + timedelta(days=1)
+                end_str = end_inclusive.isoformat()
 
-            # 方法 1: start/end
-            hist = stock.history(start=start.isoformat(), end=end_str)
-            df = self._to_standard_df(hist)
-            if df is not None and not df.empty:
-                df = df[(df['Date'] >= start) & (df['Date'] <= end)]
-                if len(df) >= 1:
-                    return df
+                # 方法 1: start/end
+                hist = stock.history(start=start.isoformat(), end=end_str)
+                df = self._to_standard_df(hist)
+                if df is not None and not df.empty:
+                    df = df[(df['Date'] >= start) & (df['Date'] <= end)]
+                    if len(df) >= 1:
+                        return df
 
-            # 方法 2: period='1mo' + end
-            hist = stock.history(period='1mo', end=end_str)
-            df = self._to_standard_df(hist)
-            if df is not None and not df.empty:
-                df = df[(df['Date'] >= start) & (df['Date'] <= end)]
-                if len(df) >= 1:
-                    return df
+                # 方法 2: period='1mo' + end
+                hist = stock.history(period='1mo', end=end_str)
+                df = self._to_standard_df(hist)
+                if df is not None and not df.empty:
+                    df = df[(df['Date'] >= start) & (df['Date'] <= end)]
+                    if len(df) >= 1:
+                        return df
 
-            # 方法 3: period='3mo'
-            hist = stock.history(period='3mo')
-            df = self._to_standard_df(hist)
-            if df is not None and not df.empty:
-                df = df[(df['Date'] >= start) & (df['Date'] <= end)]
-                if len(df) >= 1:
-                    return df
+                # 方法 3: period='3mo'
+                hist = stock.history(period='3mo')
+                df = self._to_standard_df(hist)
+                if df is not None and not df.empty:
+                    df = df[(df['Date'] >= start) & (df['Date'] <= end)]
+                    if len(df) >= 1:
+                        return df
 
-            # 方法 4: period='6mo'
-            hist = stock.history(period='6mo')
-            df = self._to_standard_df(hist)
-            if df is not None and not df.empty:
-                df = df[(df['Date'] >= start) & (df['Date'] <= end)]
-                if len(df) >= 1:
-                    return df
+                # 方法 4: period='6mo'
+                hist = stock.history(period='6mo')
+                df = self._to_standard_df(hist)
+                if df is not None and not df.empty:
+                    df = df[(df['Date'] >= start) & (df['Date'] <= end)]
+                    if len(df) >= 1:
+                        return df
 
-            return None
-        except Exception:
-            return None
+                if attempt < max_retries:
+                    time.sleep(0.3 + attempt * 0.2)
+                else:
+                    return None
+            except Exception:
+                if attempt < max_retries:
+                    time.sleep(0.3 + attempt * 0.2)
+                else:
+                    return None
+        return None
     
     def fetch_close(self, symbol: str, d: date) -> Optional[float]:
-        """Yahoo 特化：先 start/end，無資料再 period 取最近再篩"""
-        try:
-            import yfinance as yf
-            stock = yf.Ticker(symbol)
-            end_inclusive = d + timedelta(days=1)
-            
-            # 方法 1: start/end
-            hist = stock.history(start=d.isoformat(), end=end_inclusive.isoformat())
-            if hist is not None and not hist.empty:
-                return float(hist['Close'].iloc[-1])
-            
-            # 方法 2: period='1mo' + end
-            hist = stock.history(period='1mo', end=end_inclusive.isoformat())
-            if hist is not None and not hist.empty:
-                hist_dates = hist.index.normalize().date if hasattr(hist.index, 'normalize') else hist.index.date
-                mask = [dt <= d for dt in hist_dates]
-                filtered = hist[mask]
-                if not filtered.empty:
-                    # 只取該日（不是「最後一筆」）
-                    exact = filtered[filtered.index.normalize().date == d] if hasattr(filtered.index, 'normalize') else filtered[filtered.index.date == d]
+        """Yahoo 特化：先 start/end，無資料再 period 取最近再篩；失敗重試 2 次"""
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                import yfinance as yf
+                stock = yf.Ticker(symbol)
+                end_inclusive = d + timedelta(days=1)
+                
+                # 方法 1: start/end
+                hist = stock.history(start=d.isoformat(), end=end_inclusive.isoformat())
+                if hist is not None and not hist.empty:
+                    return float(hist['Close'].iloc[-1])
+                
+                # 方法 2: period='1mo' + end
+                hist = stock.history(period='1mo', end=end_inclusive.isoformat())
+                if hist is not None and not hist.empty:
+                    hist_dates = hist.index.normalize().date if hasattr(hist.index, 'normalize') else hist.index.date
+                    mask = [dt <= d for dt in hist_dates]
+                    filtered = hist[mask]
+                    if not filtered.empty:
+                        exact = filtered[filtered.index.normalize().date == d] if hasattr(filtered.index, 'normalize') else filtered[filtered.index.date == d]
+                        if not exact.empty:
+                            return float(exact['Close'].iloc[-1])
+                
+                # 方法 3: period='3mo' 不帶 end，再篩
+                hist = stock.history(period='3mo')
+                if hist is not None and not hist.empty:
+                    hist_dates = hist.index.normalize().date if hasattr(hist.index, 'normalize') else hist.index.date
+                    exact_mask = [dt == d for dt in hist_dates]
+                    exact = hist[exact_mask]
                     if not exact.empty:
                         return float(exact['Close'].iloc[-1])
-            
-            # 方法 3: period='3mo' 不帶 end，再篩
-            hist = stock.history(period='3mo')
-            if hist is not None and not hist.empty:
-                hist_dates = hist.index.normalize().date if hasattr(hist.index, 'normalize') else hist.index.date
-                exact_mask = [dt == d for dt in hist_dates]
-                exact = hist[exact_mask]
-                if not exact.empty:
-                    return float(exact['Close'].iloc[-1])
-            
-            return None
-        except Exception:
-            return None
+                
+                if attempt < max_retries:
+                    time.sleep(0.3 + attempt * 0.2)
+                else:
+                    return None
+            except Exception:
+                if attempt < max_retries:
+                    time.sleep(0.3 + attempt * 0.2)
+                else:
+                    return None
+        return None
 
 
 # =============================================================================

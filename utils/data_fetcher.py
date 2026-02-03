@@ -40,58 +40,64 @@ class DataFetcher:
         end_date 有值時為回測：取截至該日（含）的數據。
         start_date 有值時限制起始（回測 range 之前看不到）。
         
-        優先使用多數據源統一介面，若無則回退到 yfinance。
+        優先使用多數據源統一介面（Yahoo → Stooq → FMP → …），失敗時重試一次再回退到 yfinance，確保能拿到準確數據。
         """
-        try:
-            # 嘗試使用多數據源
-            if get_daily_bars is not None and end_date:
-                # 解析日期
-                if isinstance(end_date, str):
-                    end_d = datetime.strptime(end_date, "%Y-%m-%d").date()
+        def _parse_end():
+            if isinstance(end_date, str):
+                return datetime.strptime(end_date, "%Y-%m-%d").date()
+            return end_date
+
+        def _parse_start(end_d):
+            if start_date:
+                if isinstance(start_date, str):
+                    return datetime.strptime(start_date, "%Y-%m-%d").date()
+                return start_date
+            days_map = {"5d": 5, "1mo": 30, "30d": 30, "3mo": 90, "6mo": 180, "1y": 365}
+            days = days_map.get(period, 30)
+            return end_d - timedelta(days=days)
+
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                # 有 end_date 時優先使用多數據源（Yahoo → Stooq → FMP → …）
+                if get_daily_bars is not None and end_date:
+                    end_d = _parse_end()
+                    start_d = _parse_start(end_d)
+                    df = get_daily_bars(ticker, start_d, end_d, min_bars=1, merge_sources=True)
+                    if df is not None and not df.empty:
+                        df = df.set_index('Date')
+                        df.index = pd.to_datetime(df.index)
+                        return df
+                    if attempt < max_retries:
+                        time.sleep(0.2 + attempt * 0.15)
+                        continue
+
+                # 回退到 yfinance（含重試）
+                stock = yf.Ticker(ticker)
+                if end_date:
+                    end_d = _parse_end()
+                    end_inclusive = (end_d + timedelta(days=1)).isoformat()
+                    start_d = _parse_start(end_d)
+                    start_str = start_d.isoformat()
+                    hist = stock.history(start=start_str, end=end_inclusive)
+                    if hist.empty and attempt < max_retries:
+                        hist = stock.history(period=period, end=end_inclusive)
+                    if hist.empty and attempt < max_retries:
+                        time.sleep(0.2 + attempt * 0.15)
+                        continue
                 else:
-                    end_d = end_date
-                
-                if start_date:
-                    if isinstance(start_date, str):
-                        start_d = datetime.strptime(start_date, "%Y-%m-%d").date()
-                    else:
-                        start_d = start_date
+                    hist = stock.history(period=period)
+
+                if not hist.empty:
+                    return hist
+                if attempt < max_retries:
+                    time.sleep(0.2 + attempt * 0.15)
+            except Exception:
+                if attempt < max_retries:
+                    time.sleep(0.2 + attempt * 0.15)
                 else:
-                    # 根據 period 計算 start
-                    days_map = {"5d": 5, "1mo": 30, "30d": 30, "3mo": 90, "6mo": 180, "1y": 365}
-                    days = days_map.get(period, 30)
-                    start_d = end_d - timedelta(days=days)
-                
-                df = get_daily_bars(ticker, start_d, end_d)
-                if df is not None and not df.empty:
-                    # 轉換為 yfinance 格式
-                    df = df.set_index('Date')
-                    df.index = pd.to_datetime(df.index)
-                    return df
-            
-            # 回退到 yfinance
-            stock = yf.Ticker(ticker)
-            if end_date:
-                # yfinance end 是 exclusive，要加一天
-                if isinstance(end_date, str):
-                    end_d = datetime.strptime(end_date, "%Y-%m-%d").date()
-                else:
-                    end_d = end_date
-                end_inclusive = (end_d + timedelta(days=1)).isoformat()
-                
-                if start_date:
-                    hist = stock.history(start=start_date, end=end_inclusive)
-                else:
-                    hist = stock.history(period=period, end=end_inclusive)
-            else:
-                hist = stock.history(period=period)
-            
-            if hist.empty:
-                return None
-            
-            return hist
-        except Exception as e:
-            return None
+                    return None
+        return None
     
     def get_yahoo_info(self, ticker: str) -> Optional[Dict]:
         """

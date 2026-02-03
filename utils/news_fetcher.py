@@ -6,8 +6,7 @@ REISHI 霊視 v5.0 - 即時新聞取得（Finnhub）
 """
 
 import os
-import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Dict, Optional, Any
 
 try:
@@ -73,7 +72,7 @@ def fetch_news_for_tickers(
     max_per_ticker: int = 20,
 ) -> tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]]]:
     """
-    為多檔標的取得新聞。
+    為多檔標的取得新聞（並行請求，加快速度）。
     回傳 (all_news_flat, news_by_ticker)。
     all_news_flat / news_by_ticker 每筆為 dict: headline, source, timestamp, content, ticker。
     """
@@ -82,13 +81,17 @@ def fetch_news_for_tickers(
     news_by_ticker = {t: [] for t in tickers}
     if not key:
         return all_news, news_by_ticker
-    for i, ticker in enumerate(tickers):
-        items = fetch_company_news(ticker, from_date, to_date, api_key=key)
-        items = items[:max_per_ticker]
-        news_by_ticker[ticker] = items
-        all_news.extend(items)
-        if i < len(tickers) - 1:
-            time.sleep(0.25)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    _workers = min(6, max(1, len(tickers)))
+    def _fetch(t):
+        items = fetch_company_news(t, from_date, to_date, api_key=key)
+        return (t, items[:max_per_ticker])
+    with ThreadPoolExecutor(max_workers=_workers) as executor:
+        futures = {executor.submit(_fetch, t): t for t in tickers}
+        for fut in as_completed(futures):
+            ticker, items = fut.result()
+            news_by_ticker[ticker] = items
+            all_news.extend(items)
     return all_news, news_by_ticker
 
 

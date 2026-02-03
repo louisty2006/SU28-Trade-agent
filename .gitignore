@@ -9,3 +9,5 @@ config.yaml
 *.db
 *.sqlite
 *.sqlite3
+debug_run.log
+.cursor/debug.log

@@ -45,10 +45,10 @@ class PatternRecognition:
     def scan_all(self, tickers: List[str], market_data: dict, on_ticker=None) -> List[PatternCandidate]:
         """
         第一阶段：规则侦测，快速扫描全市场
-        返回候选清单（约 50-100 支）。on_ticker(ticker, index, total) 可選，回報正在掃描的標的。
+        返回候选清单。on_ticker(ticker, index, total) 可選，回報正在掃描的標的。
         """
         candidates = []
-        limited = tickers[:50]  # MVP: 限制扫描数量
+        limited = [t for t in tickers if t in market_data]
         total = len(limited)
         for idx, ticker in enumerate(limited):
             if callable(on_ticker):

@@ -19,6 +19,32 @@ import os
 # 與 v4.3 相同：依序載入 .env，既有 API Key（OPENROUTER / SCITELY 等）直接沿用
 from dotenv import load_dotenv
 _env_dir = os.path.dirname(os.path.abspath(__file__))
+_DEBUG_LOG_PATH = os.path.join(_env_dir, ".cursor", "debug.log")
+_DEBUG_LOG_FALLBACK = os.path.join(_env_dir, "debug_run.log")
+
+def _debug_log(payload):
+    """寫入兩處 log，方便在專案根目錄用 tail/grep 查看。"""
+    for _path in (_DEBUG_LOG_PATH, _DEBUG_LOG_FALLBACK):
+        try:
+            os.makedirs(os.path.dirname(_path), exist_ok=True)
+            with open(_path, "a", encoding="utf-8") as _f:
+                _f.write(__import__("json").dumps(payload, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+_interactive_run_id = None
+
+def _run_summary(line: str, run_id: str = None):
+    """寫入單行運行摘要到 debug_run.log 與 .cursor/debug.log，方便 tail -1 或 grep [REISHI] 查看有效性/錯誤。"""
+    rid = run_id if run_id is not None else globals().get("_interactive_run_id") or str(int(time.time() * 1000))
+    msg = f"[REISHI] run_id={rid} {line}"
+    for _path in (_DEBUG_LOG_PATH, _DEBUG_LOG_FALLBACK):
+        try:
+            os.makedirs(os.path.dirname(_path), exist_ok=True)
+            with open(_path, "a", encoding="utf-8") as _f:
+                _f.write(msg + "\n")
+        except Exception:
+            pass
 _env_candidates = [
     os.path.join(_env_dir, ".env"),
     os.path.expanduser("~/stock_scanner/.env"),
@@ -233,13 +259,22 @@ class ReishiV5:
         "決策引擎",
     )
 
-    def run_daily_for_backtest(self, as_of_date, backtest_start=None, quick: bool = False, full_universe: bool = False, silent: bool = True, on_progress=None, on_llm_progress=None, on_ticker=None, on_step_activity=None, flow_logger=None, report_dir=None):
+    def run_daily_for_backtest(self, as_of_date, backtest_start=None, stock_count: int = 20, silent: bool = True, on_progress=None, on_llm_progress=None, on_ticker=None, on_step_activity=None, flow_logger=None, report_dir=None, step_log=None, day_index: int = 0, total_days: int = 0, day_start_ts: float = 0, est_per_day_sec: float = 0, pre_fetched_market_data=None):
         """
         為回測跑單日 v5.0 流程：數據僅到 as_of_date（無偷看），回傳 (decision, all_analyses)。
-        flow_logger: 可選 FlowLogger，log 依流程圖一層層輸出（輸入層→第一層防護→五大 AI→第二層防護→結果）。
-        on_step_activity / on_ticker 仍會呼叫（若未提供 flow_logger 則靠其輸出）。
-        report_dir 有值時會寫入細項報告 step_01..step_07。
+        stock_count: 每日掃描股票數量（預設 20）。
+        pre_fetched_market_data: 若提供（本地 parquet），則跳過網路取數，直接用此 dict[ticker]->DataFrame。
+        flow_logger: 可選 FlowLogger。step_log(msg): 可選，每步寫入步驟日誌檔。
+        day_index/total_days/day_start_ts/est_per_day_sec: 供進度顯示整體剩餘時間用。
         """
+        # #region agent log
+        try:
+            import json, time
+            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                _dbg.write(json.dumps({"hypothesisId": "H5", "location": "main_v5.py:236", "message": "run_daily_for_backtest_entry", "data": {"stock_count": stock_count, "as_of_date": str(as_of_date)}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
         from datetime import timedelta
         from reporting.step_report import write_step_report
         total_steps = 7
@@ -266,20 +301,33 @@ class ReishiV5:
             if callable(on_ticker):
                 on_ticker(t, i, n)
         def _on_llm_wrap(phase, total, message, provider=None):
+            _step(f"決策引擎 LLM 第 {phase}/{total} 「{message}」" + (f" 使用 {provider}" if provider else " 進行中…"))
             if flow_logger:
                 flow_logger.log_layer2_llm_phase(phase, total, message, provider)
             if callable(on_llm_progress):
                 on_llm_progress(phase, total, message, provider)
+        _step = step_log if callable(step_log) else (lambda msg: None)
 
         start_d = (backtest_start if backtest_start else (as_of_date - timedelta(days=90)) if hasattr(as_of_date, "day") else None)
         end_str = as_of_date.strftime("%Y-%m-%d") if hasattr(as_of_date, "strftime") else as_of_date
         start_str = start_d.strftime("%Y-%m-%d") if start_d and hasattr(start_d, "strftime") else None
-        tickers_to_fetch = self._get_scan_tickers(quick=quick, full_universe=full_universe)
+        tickers_to_fetch = self._get_scan_tickers(cap=stock_count)
+        _step(f"取得掃描列表 共 {len(tickers_to_fetch)} 檔")
+        # #region agent log
+        try:
+            import json, time
+            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                _dbg.write(json.dumps({"hypothesisId": "H1", "location": "main_v5.py:286", "message": "tickers_to_fetch_after_get_scan_tickers", "data": {"stock_count_param": stock_count, "tickers_count": len(tickers_to_fetch), "first_10_tickers": tickers_to_fetch[:10]}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
         # 即時新聞：Finnhub（回測時用 as_of_date 區間，不偷看未來）
         from utils.news_fetcher import fetch_news_for_tickers, to_news_objects
         to_date_news = end_str
         from_date_news = (as_of_date - timedelta(days=7)).strftime("%Y-%m-%d") if hasattr(as_of_date, "strftime") else to_date_news
+        _step(f"取得新聞 開始 {len(tickers_to_fetch)} 檔 ({from_date_news}～{to_date_news})")
         all_news_raw, news_by_ticker_raw = fetch_news_for_tickers(tickers_to_fetch, from_date_news, to_date_news)
+        _step(f"取得新聞 完成 共 {len(all_news_raw)} 筆")
         all_news_for_causal = to_news_objects(all_news_raw)
         news_by_ticker_for_sentiment = {t: to_news_objects(news_by_ticker_raw.get(t, [])) for t in tickers_to_fetch}
         if all_news_raw:
@@ -293,6 +341,14 @@ class ReishiV5:
         if flow_logger:
             # 輸入層：你的狀態 → 市場數據 → 即時新聞 → 霊視記憶（標明數據源）
             your_state = f"現金 {self.portfolio.cash:,.0f}、持倉 {len(self.portfolio.positions)} 檔、總值 {self.portfolio.total_value:,.0f}"
+            # #region agent log
+            try:
+                import json, time
+                with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                    _dbg.write(json.dumps({"hypothesisId": "H4", "location": "main_v5.py:313", "message": "flow_logger_market_data_desc", "data": {"tickers_to_fetch_count": len(tickers_to_fetch), "first_10": tickers_to_fetch[:10]}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            # #endregion
             market_data_desc = f"掃描標的 {len(tickers_to_fetch)} 檔（{', '.join(tickers_to_fetch[:8])}{' ...' if len(tickers_to_fetch) > 8 else ''}）；數據源：Yahoo (DataFetcher) / yfinance"
             try:
                 mem_stats = self.memory.get_statistics()
@@ -314,8 +370,14 @@ class ReishiV5:
             pass
         # #endregion
         if flow_logger:
-            flow_logger.log_layer1_start("Yahoo (DataFetcher) / yfinance（依環境）")
-        market_data, data_source = self._fetch_and_validate_data(end_date=as_of_date, start_date=start_d, quick=quick, full_universe=full_universe, silent=silent, on_ticker=_on_ticker_wrap)
+            flow_logger.log_layer1_start("本地 parquet" if pre_fetched_market_data else "Yahoo (DataFetcher) / yfinance（依環境）")
+        _step(f"步驟1 數據獲取 開始 {len(tickers_to_fetch)} 檔")
+        if pre_fetched_market_data is not None:
+            market_data = pre_fetched_market_data
+            data_source = "本地 parquet"
+        else:
+            market_data, data_source = self._fetch_and_validate_data(end_date=as_of_date, start_date=start_d, cap=stock_count, silent=silent, on_ticker=_on_ticker_wrap, on_fetch_progress=_step)
+        _step(f"步驟1 數據獲取 完成 有效 {len(market_data)} 檔 來源 {data_source}")
         # #region agent log
         try:
             import json
@@ -344,6 +406,7 @@ class ReishiV5:
             flow_logger.log_ai_layer_start()
         # 細項 2：圖表型態識別（數據源：第一層驗證後的 K 線）
         _prog(2, "圖形掃描", 0)
+        _step(f"步驟2 圖表型態識別 開始 {len(tickers)} 檔")
         _activity(2, f"開始掃描 {len(tickers)} 檔圖表型態（突破、VCP 等）…")
         if flow_logger:
             flow_logger.log_ai_2_start(len(tickers), data_sources="第一層驗證後的 K 線（步驟 1 的 Yahoo/DataFetcher）")
@@ -375,12 +438,14 @@ class ReishiV5:
         # #endregion
         if flow_logger:
             flow_logger.log_ai_2_result(len(pattern_analysis), [getattr(c, "ticker", "") for c in pattern_analysis] if pattern_analysis else None)
+        _step(f"步驟2 圖表型態識別 完成 候選 {len(pattern_analysis)} 檔")
         _activity(2, f"圖形掃描完成，候選數 {len(pattern_analysis)}")
         _prog(2, "圖形掃描", 100)
         if report_dir:
             write_step_report(report_dir, 2, flow_steps[1], short_names[1])
         # 細項 3：因果推理（數據源：Finnhub 新聞、持倉）
         _prog(3, "因果分析", 0)
+        _step("步驟3 因果推理 開始（LLM 因果鏈）")
         _activity(3, "因果推理：分析新聞影響與持倉風險…")
         if flow_logger:
             flow_logger.log_ai_3_start(data_sources="即時新聞（Finnhub）、持倉（本地）；LLM 因果鏈（四角）")
@@ -400,12 +465,14 @@ class ReishiV5:
                     if chain:
                         causal_lines.append((str(chain))[:66])
             flow_logger.log_ai_3_result(causal_lines if causal_lines else None)
+        _step("步驟3 因果推理 完成")
         _activity(3, "因果分析完成")
         _prog(3, "因果分析", 100)
         if report_dir:
             write_step_report(report_dir, 3, flow_steps[2], short_names[2])
         # 細項 4：情緒分析（數據源：Finnhub 新聞、標的）
         _prog(4, "情緒分析", 0)
+        _step(f"步驟4 情緒分析 開始 {len(tickers)} 檔")
         _activity(4, f"開始對 {len(tickers)} 檔做情緒分析…")
         if flow_logger:
             flow_logger.log_ai_4_start(len(tickers), data_sources="即時新聞（Finnhub）、標的列表；LLM 情緒分析（四角）")
@@ -429,12 +496,14 @@ class ReishiV5:
                         part += f" {fstr}"
                         sentiment_lines.append(part[:66])
             flow_logger.log_ai_4_result(sentiment_lines if sentiment_lines else None)
+        _step("步驟4 情緒分析 完成")
         _activity(4, "情緒分析完成")
         _prog(4, "情緒分析", 100)
         if report_dir:
             write_step_report(report_dir, 4, flow_steps[3], short_names[3])
         # 細項 5：Multi-Agent 協作分析（數據源：圖表候選 + 市場數據；LLM 四角）
         _prog(5, "多智能體", 0)
+        _step(f"步驟5 Multi-Agent 開始 候選 {len(pattern_analysis)} 檔（LLM 四角）")
         _activity(5, "多智能體：彙總候選與市場數據、產出共識…")
         if flow_logger:
             flow_logger.log_ai_5_start(len(pattern_analysis), data_sources="圖表候選（步驟 2）、市場數據（步驟 1）；LLM 四角（Scitely/Cohere/Mistral/OpenRouter）")
@@ -450,18 +519,20 @@ class ReishiV5:
                     if v is not None:
                         multi_lines.append(f"  {k}: {str(v)[:60]}")
             flow_logger.log_ai_5_result(multi_lines if multi_lines else None)
+        _step("步驟5 Multi-Agent 完成")
         _activity(5, "多智能體分析完成")
         _prog(5, "多智能體", 100)
         if report_dir:
             write_step_report(report_dir, 5, flow_steps[4], short_names[4])
         # 細項 6：霊視記憶參考（數據源：霊視記憶 DB、圖表候選）
         _prog(6, "記憶洞察", 0)
+        _step("步驟6 霊視記憶 開始（LLM 摘要/洞察）")
         _activity(6, "霊視記憶：查詢歷史案例、提取洞察…")
         if flow_logger:
             flow_logger.log_ai_6_start(data_sources="霊視記憶 DB（本地）、圖表候選（步驟 2）；LLM 摘要/洞察（四角）")
         memory_insights = self.memory.get_insights_for_candidates(pattern_analysis)
+        n_insights = len(memory_insights.get("insights", [])) if isinstance(memory_insights, dict) else 0
         if flow_logger:
-            n_insights = len(memory_insights.get("insights", [])) if isinstance(memory_insights, dict) else 0
             insight_preview = []
             if isinstance(memory_insights, dict):
                 for ins in (memory_insights.get("insights") or [])[:2]:
@@ -470,6 +541,7 @@ class ReishiV5:
                     else:
                         insight_preview.append(str(ins)[:66])
             flow_logger.log_ai_6_result(n_insights, insight_preview if insight_preview else None)
+        _step(f"步驟6 霊視記憶 完成 {n_insights} 條洞察")
         _activity(6, "記憶洞察完成")
         _prog(6, "記憶洞察", 100)
         if report_dir:
@@ -483,6 +555,7 @@ class ReishiV5:
         )
         # 細項 7：決策引擎 — 第二層防護：LLM 防幻覺（數據源：防幻覺模組 + 步驟 1～6）
         _prog(7, "決策引擎（LLM 決策中…）", 0)
+        _step("步驟7 決策引擎 開始（LLM 防幻覺 多輪）")
         _activity(7, "決策引擎：組裝 prompt、呼叫 LLM（防幻覺 + 自我質疑）…")
         if flow_logger:
             flow_logger.log_layer2_start(data_sources="防幻覺模組（Scitely/Cohere/Mistral/OpenRouter）、步驟 1～6 分析結果")
@@ -493,6 +566,7 @@ class ReishiV5:
             acts = getattr(decision, "actions", []) or []
             summary = ", ".join([f"{getattr(a, 'action', '')} {getattr(a, 'ticker', '')}" for a in acts[:3]]) if acts else "無操作"
             flow_logger.log_layer2_result(len(acts), summary)
+        _step(f"步驟7 決策引擎 完成 " + (f"{len(getattr(decision, 'actions', []) or [])} 筆行動" if decision else "無決策"))
         _activity(7, "決策引擎完成，已解析行動與持倉建議")
         _prog(7, "決策引擎", 100)
         llm_reasoning = ""
@@ -510,68 +584,111 @@ class ReishiV5:
             flow_logger.log_flow_end()
         return decision, all_analyses
     
-    def _get_scan_tickers(self, quick: bool = False, full_universe: bool = False):
-        """取得要掃描的股票列表。quick=True 時 20 支（小回測）；quick=False 且 full_universe=True 時從美股池取（大回測，預設 cap 50）；否則 50 支。"""
+    def _get_scan_tickers(self, cap: int = 20):
+        """取得要掃描的股票列表。cap 為數量上限（預設 20）。"""
+        # #region agent log
+        try:
+            import json, time
+            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                _dbg.write(json.dumps({"hypothesisId": "H1", "location": "main_v5.py:530", "message": "_get_scan_tickers_entry", "data": {"cap": cap}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
         import yaml
         tickers = []
-        if full_universe:
-            # 大回測：從 data/us_universe.csv 取美股（cap 由 env 或 50）
-            us_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "us_universe.csv")
-            if os.path.isfile(us_path):
+        # 優先從 us_universe.csv 取美股
+        us_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "us_universe.csv")
+        if os.path.isfile(us_path):
+            try:
+                import csv
+                with open(us_path, "r", encoding="utf-8-sig") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        sym = (row.get("symbol") or row.get("Symbol") or "").strip()
+                        if sym:
+                            tickers.append(sym)
+                # #region agent log
                 try:
-                    import csv
-                    with open(us_path, "r", encoding="utf-8") as f:
-                        reader = csv.DictReader(f)
-                        for row in reader:
-                            sym = (row.get("symbol") or row.get("Symbol") or "").strip()
-                            if sym:
-                                tickers.append(sym)
+                    import json, time
+                    with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                        _dbg.write(json.dumps({"hypothesisId": "H1", "location": "main_v5.py:545", "message": "us_universe_loaded", "data": {"us_path": us_path, "tickers_loaded": len(tickers), "first_10": tickers[:10]}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}, ensure_ascii=False) + "\n")
                 except Exception:
                     pass
-            cap_full = int(os.getenv("V5_BACKTEST_FULL_CAP", "50"))
-            return tickers[:cap_full] if tickers else []
-        if os.path.isfile("config.yaml"):
+                # #endregion
+            except Exception as e:
+                # #region agent log
+                try:
+                    import json, time
+                    with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                        _dbg.write(json.dumps({"hypothesisId": "H1", "location": "main_v5.py:546", "message": "us_universe_load_failed", "data": {"error": str(e)}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+                # #endregion
+                pass
+        # 若 us_universe 不足，從 config.yaml 補
+        if len(tickers) < cap and os.path.isfile("config.yaml"):
             try:
                 with open("config.yaml", "r", encoding="utf-8") as f:
                     cfg = yaml.safe_load(f)
                 if cfg and isinstance(cfg.get("mvp"), dict):
-                    tickers = cfg["mvp"].get("scan_tickers") or []
+                    _seen = set(t.upper() for t in tickers)
+                    for sym in (cfg["mvp"].get("scan_tickers") or []):
+                        if sym.upper() not in _seen:
+                            tickers.append(sym)
+                            _seen.add(sym.upper())
             except Exception:
                 pass
-        if not tickers:
-            env_tickers = os.getenv("V5_SCAN_TICKERS", "AAPL,GOOGL,MSFT,TSLA,NVDA")
-            tickers = [t.strip() for t in env_tickers.split(",") if t.strip()]
-        cap = 20 if quick else 50
-        # 小回測（quick=True）時若來源少於 20 檔，從美股池或預設名單補足到 20 檔
-        if quick and len(tickers) < 20:
+        # 若仍不足，從環境變數或預設名單補足
+        if len(tickers) < cap:
             _seen = set(t.upper() for t in tickers)
-            _base = os.path.dirname(os.path.abspath(__file__))
-            us_path = os.path.join(_base, "data", "us_universe.csv")
-            if os.path.isfile(us_path):
-                try:
-                    import csv
-                    with open(us_path, "r", encoding="utf-8") as f:
-                        reader = csv.DictReader(f)
-                        for row in reader:
-                            sym = (row.get("symbol") or row.get("Symbol") or "").strip()
-                            if sym and sym.upper() not in _seen and len(tickers) < 20:
-                                tickers.append(sym)
-                                _seen.add(sym.upper())
-                except Exception:
-                    pass
-            # fallback：仍不足 20 則用預設流動性名單補足
-            _default_20 = ("AAPL", "GOOGL", "MSFT", "AMZN", "NVDA", "META", "TSLA", "BRK.B", "JPM", "V", "JNJ", "WMT", "PG", "UNH", "HD", "DIS", "BAC", "ADBE", "XOM", "NFLX")
-            for sym in _default_20:
-                if len(tickers) >= 20:
+            env_tickers = os.getenv("V5_SCAN_TICKERS", "AAPL,GOOGL,MSFT,TSLA,NVDA")
+            for sym in [t.strip() for t in env_tickers.split(",") if t.strip()]:
+                if sym.upper() not in _seen and len(tickers) < cap:
+                    tickers.append(sym)
+                    _seen.add(sym.upper())
+        # 最後用預設流動性名單補足
+        if len(tickers) < cap:
+            _seen = set(t.upper() for t in tickers)
+            _default = ("AAPL", "GOOGL", "MSFT", "AMZN", "NVDA", "META", "TSLA", "BRK.B", "JPM", "V", "JNJ", "WMT", "PG", "UNH", "HD", "DIS", "BAC", "ADBE", "XOM", "NFLX", "CRM", "COST", "PEP", "AVGO", "TMO", "ABBV", "ACN", "MRK", "LLY", "CVX")
+            for sym in _default:
+                if len(tickers) >= cap:
                     break
                 if sym.upper() not in _seen:
                     tickers.append(sym)
                     _seen.add(sym.upper())
+        # #region agent log
+        try:
+            import json, time
+            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                _dbg.write(json.dumps({"hypothesisId": "H1", "location": "main_v5.py:602", "message": "_get_scan_tickers_exit", "data": {"cap": cap, "tickers_returned": len(tickers[:cap]), "first_10_returned": tickers[:cap][:10]}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
         return tickers[:cap]
 
-    def _fetch_and_validate_data(self, end_date=None, start_date=None, quick: bool = False, full_universe: bool = False, silent: bool = False, on_ticker=None):
-        """获取并验证市场数据。end_date 有值時為回測：只取該日及之前（無偷看）。on_ticker(ticker, index, total) 可選回報正在取的標的。返回 (market_data, data_source_str)。"""
-        tickers = self._get_scan_tickers(quick=quick, full_universe=full_universe)
+    def _fetch_and_validate_data(self, end_date=None, start_date=None, cap: int = 20, silent: bool = False, on_ticker=None, on_fetch_progress=None):
+        """获取并验证市场数据。on_fetch_progress(msg) 可選，並行取得時每 N 筆回報一次（同時會 print）。"""
+        import logging
+        _yf_log = logging.getLogger("yfinance")
+        _yf_prev_level = _yf_log.level
+        _yf_log.setLevel(logging.ERROR)
+        _yf_log.disabled = True
+        try:
+            return self._fetch_and_validate_data_impl(end_date, start_date, cap, silent, on_ticker, on_fetch_progress)
+        finally:
+            _yf_log.disabled = False
+            _yf_log.setLevel(_yf_prev_level)
+
+    def _fetch_and_validate_data_impl(self, end_date=None, start_date=None, cap: int = 20, silent: bool = False, on_ticker=None, on_fetch_progress=None):
+        # #region agent log
+        try:
+            import json, time
+            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                _dbg.write(json.dumps({"hypothesisId": "H3", "location": "main_v5.py:604", "message": "_fetch_and_validate_data_entry", "data": {"cap": cap}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        tickers = self._get_scan_tickers(cap=cap)
         market_data = {}
         data_source = "yfinance"
         end_str = end_date.strftime("%Y-%m-%d") if hasattr(end_date, "strftime") else end_date
@@ -585,41 +702,94 @@ class ReishiV5:
             pass
         # #endregion
         n_tickers = len(tickers)
+        _max_workers = min(16, max(4, n_tickers))
         try:
             from utils.data_fetcher import DataFetcher
+            from concurrent.futures import ThreadPoolExecutor, as_completed
             fetcher = DataFetcher()
             data_source = "Yahoo (DataFetcher)"
+
+            def _fetch_one(t):
+                try:
+                    df = fetcher.get_yahoo_history(t, period="90d", end_date=end_str, start_date=start_str)
+                    return (t, df, None)
+                except Exception as e:
+                    return (t, None, e)
+
+            _results = {}
+            _done_count = 0
+            _progress_every = max(50, min(500, n_tickers // 10))
+            executor = ThreadPoolExecutor(max_workers=_max_workers)
+            try:
+                _futures = {executor.submit(_fetch_one, t): t for t in tickers}
+                for _f in as_completed(_futures):
+                    _t, _df, _err = _f.result()
+                    _results[_t] = (_df, _err)
+                    _done_count += 1
+                    if _done_count % _progress_every == 0 or _done_count == n_tickers:
+                        _sample = list(_results.keys())[-5:]
+                        _msg = f"數據獲取：進行中 {_done_count}/{n_tickers}（例如：{', '.join(_sample)}）"
+                        print(f"    {_msg}", flush=True)
+                        if callable(on_fetch_progress):
+                            on_fetch_progress(_msg)
+            except KeyboardInterrupt:
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+            finally:
+                executor.shutdown(wait=True)
+            _first_done = False
+            _used_multi_fallback = False
+            from datetime import datetime as _dt, timedelta as _td
+            _end_d = _dt.strptime(end_str, "%Y-%m-%d").date() if end_str else None
+            _start_d = _dt.strptime(start_str, "%Y-%m-%d").date() if start_str else (_end_d - _td(days=90) if _end_d else None)
             for idx, ticker in enumerate(tickers):
                 if callable(on_ticker):
                     on_ticker(ticker, idx + 1, n_tickers)
-                try:
-                    df = fetcher.get_yahoo_history(ticker, period="90d", end_date=end_str, start_date=start_str)
-                    # #region agent log
-                    if idx == 0:
+                _df, _err = _results.get(ticker, (None, None))
+                if not _first_done:
+                    try:
+                        import json
+                        _df_len = len(_df) if _df is not None and not (_df.empty if hasattr(_df, 'empty') else True) else 0
+                        with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
+                            _dbg.write(json.dumps({"hypothesisId": "H4", "message": "first_ticker_fetch_result", "data": {"ticker": ticker, "df_is_none": _df is None, "df_len": _df_len, "end_str": end_str, "start_str": start_str}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+                    except Exception:
+                        pass
+                    _first_done = True
+                if _err is not None:
+                    if not silent:
+                        print(f"   ⚠ {ticker}: {_err}")
+                    _df = None
+                if _df is not None and not _df.empty and len(_df) >= 20:
+                    market_data[ticker] = _df
+                    if not silent:
+                        print(f"   ✓ {ticker}: {len(_df)} 筆")
+                else:
+                    # 第一來源不足時，用多數據源補拿（Stooq/FMP 等），確保拿到準確數據
+                    if _end_d is not None and _start_d is not None:
                         try:
-                            import json
-                            _df_len = len(df) if df is not None and not df.empty else 0
-                            _df_is_none = df is None
-                            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                                _dbg.write(json.dumps({"hypothesisId": "H4", "message": "first_ticker_fetch_result", "data": {"ticker": ticker, "df_is_none": _df_is_none, "df_len": _df_len, "end_str": end_str, "start_str": start_str}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+                            import pandas as _pd
+                            from utils.data_sources import get_daily_bars
+                            _df2 = get_daily_bars(ticker, _start_d, _end_d, min_bars=20, merge_sources=True)
+                            if _df2 is not None and not _df2.empty and len(_df2) >= 20:
+                                _df2 = _df2.set_index('Date')
+                                _df2.index = _pd.to_datetime(_df2.index)
+                                market_data[ticker] = _df2
+                                _used_multi_fallback = True
+                                if not silent:
+                                    print(f"   ✓ {ticker}: {len(_df2)} 筆（多數據源）")
+                                continue
                         except Exception:
                             pass
-                    # #endregion
-                    if df is not None and not df.empty and len(df) >= 20:
-                        market_data[ticker] = df
-                        if not silent:
-                            print(f"   ✓ {ticker}: {len(df)} 筆")
-                    else:
-                        if not silent:
-                            print(f"   ⚠ {ticker}: 資料不足，跳過")
-                except Exception as e:
                     if not silent:
-                        print(f"   ⚠ {ticker}: {e}")
+                        print(f"   ⚠ {ticker}: 資料不足，跳過")
+            if _used_multi_fallback:
+                data_source = "Yahoo+MultiSource"
             if not market_data and not silent:
                 print("   ⚠ 無有效數據，使用預設空結構")
         except ImportError:
             import yfinance as yf
             from datetime import timedelta
+            from concurrent.futures import ThreadPoolExecutor, as_completed
             data_source = "yfinance"
             end_excl = None
             if end_str:
@@ -628,19 +798,68 @@ class ReishiV5:
                     end_excl = (d + timedelta(days=1)).strftime("%Y-%m-%d")
                 except Exception:
                     end_excl = None
+
+            def _fetch_one_yf(t):
+                try:
+                    stock = yf.Ticker(t)
+                    hist = stock.history(period="90d", end=end_excl) if end_excl else stock.history(period="90d")
+                    return (t, hist, None)
+                except Exception as e:
+                    return (t, None, e)
+
+            _results = {}
+            _done_count = 0
+            _progress_every = max(50, min(500, n_tickers // 10))
+            executor = ThreadPoolExecutor(max_workers=_max_workers)
+            try:
+                _futures = {executor.submit(_fetch_one_yf, t): t for t in tickers}
+                for _f in as_completed(_futures):
+                    _t, _df, _err = _f.result()
+                    _results[_t] = (_df, _err)
+                    _done_count += 1
+                    if _done_count % _progress_every == 0 or _done_count == n_tickers:
+                        _sample = list(_results.keys())[-5:]
+                        _msg = f"數據獲取：進行中 {_done_count}/{n_tickers}（例如：{', '.join(_sample)}）"
+                        print(f"    {_msg}", flush=True)
+                        if callable(on_fetch_progress):
+                            on_fetch_progress(_msg)
+            except KeyboardInterrupt:
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+            finally:
+                executor.shutdown(wait=True)
+            _end_d = datetime.strptime(end_str, "%Y-%m-%d").date() if end_str else None
+            _start_d = datetime.strptime(start_str, "%Y-%m-%d").date() if start_str else (_end_d - timedelta(days=90) if _end_d else None)
             for idx, ticker in enumerate(tickers):
                 if callable(on_ticker):
                     on_ticker(ticker, idx + 1, n_tickers)
-                try:
-                    stock = yf.Ticker(ticker)
-                    hist = stock.history(period="90d", end=end_excl) if end_excl else stock.history(period="90d")
-                    if hist is not None and not hist.empty and len(hist) >= 20:
-                        market_data[ticker] = hist
-                        if not silent:
-                            print(f"   ✓ {ticker}: {len(hist)} 筆")
-                except Exception as e:
+                _df, _err = _results.get(ticker, (None, None))
+                if _err is not None:
                     if not silent:
-                        print(f"   ⚠ {ticker}: {e}")
+                        print(f"   ⚠ {ticker}: {_err}")
+                    _df = None
+                if _df is not None and not _df.empty and len(_df) >= 20:
+                    market_data[ticker] = _df
+                    if not silent:
+                        print(f"   ✓ {ticker}: {len(_df)} 筆")
+                elif _end_d and _start_d:
+                    try:
+                        import pandas as _pd
+                        from utils.data_sources import get_daily_bars
+                        _df2 = get_daily_bars(ticker, _start_d, _end_d, min_bars=20, merge_sources=True)
+                        if _df2 is not None and not _df2.empty and len(_df2) >= 20:
+                            _df2 = _df2.set_index('Date')
+                            _df2.index = _pd.to_datetime(_df2.index)
+                            market_data[ticker] = _df2
+                            data_source = "yfinance+MultiSource"
+                            if not silent:
+                                print(f"   ✓ {ticker}: {len(_df2)} 筆（多數據源）")
+                    except Exception:
+                        if not silent:
+                            print(f"   ⚠ {ticker}: 資料不足，跳過")
+                else:
+                    if not silent:
+                        print(f"   ⚠ {ticker}: 資料不足，跳過")
         return market_data, data_source
     
     def start_monitoring(self):
@@ -668,8 +887,8 @@ class ReishiV5:
                 print(f"  • {insight}")
 
 
-def run_backtest_v5_full_range(start_date: str, end_date: str, quick: bool = False, full_universe: bool = False):
-    """v5.0 大回測／小回測：逐日跑 v5.0 流程，回傳 (summary_path, trades_path)。full_universe=True 時從美股池取（大回測），quick=True 時 20 檔（小回測）。"""
+def run_backtest_v5_full_range(start_date: str, end_date: str, stock_count: int = 20, use_local_data: bool = False):
+    """v5.0/v5.1 回測：逐日跑 v5.0 流程，回傳 (summary_path, trades_path)。stock_count 為每日掃描股票數量。use_local_data=True 時從本地 parquet 讀 K 線，速度快。"""
     from datetime import datetime as dt
     from core.backtest_engine import (
         BacktestEngine,
@@ -679,6 +898,7 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, quick: bool = Fal
         apply_v5_decision,
     )
     from reporting.step_report import write_daily_final_report
+    from core.data_manager import read_local_market_data_for_date
     start_d = dt.strptime(start_date, "%Y-%m-%d").date()
     end_d = dt.strptime(end_date, "%Y-%m-%d").date()
     engine = BacktestEngine(config_path="config.json")
@@ -689,16 +909,27 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, quick: bool = Fal
         return None, None
     output_dir = f"reports/backtest_range/{start_date}_to_{end_date}"
     os.makedirs(output_dir, exist_ok=True)
-    mode_str = "小回測（20 檔/日）" if quick else "大回測（美股池約 50 檔/日）" if full_universe else "回測（50 檔/日）"
+    n_days = len(trading_days)
+    # 預計運行時間：本地約 15–20 分/天，即時約 1.5*stock_count+90 秒/天
+    est_per_day_sec = (15 * 60) if use_local_data else (stock_count * 1.5 + 90)
+    est_total_sec = n_days * est_per_day_sec
+    est_min = est_total_sec / 60
+    est_hr = est_min / 60
+    if est_hr >= 1:
+        est_str = f"約 {est_hr:.1f} 小時"
+    else:
+        est_str = f"約 {est_min:.0f} 分鐘"
     print("\n" + "=" * 70)
-    print("🔗 REISHI v5.0 回测（逐日 v5.0 流程） " + mode_str)
+    print(f"🔗 REISHI v5.1 回测（逐日 v5.0 流程）— 每日 {stock_count} 檔" + (" [本地數據]" if use_local_data else ""))
     print("=" * 70)
-    print(f"📅 期間: {start_date} → {end_date}，共 {len(trading_days)} 個交易日")
+    print(f"📅 期間: {start_date} → {end_date}，共 {n_days} 個交易日")
     print(f"💰 初始資金: {config.initial_cash:,.0f} HKD")
+    print(f"⏱ 預計運行時間：{est_str}（每日約 {est_per_day_sec/60:.1f} 分鐘）")
     print(f"📁 細項報告與當日報告: {output_dir}/daily_YYYY-MM-DD/")
     print("=" * 70)
     print("⏳ 每日會跑完整 v5.0 流程（數據+多模組+LLM），首日可能需數分鐘，請稍候…")
     print("📄 回測「完整跑完」後: backtest_summary.csv, backtest_trades.csv")
+    print("📋 每一步驟會寫入: REIKAN_steps.log（含時間戳、數據來源、LLM 階段）")
     print("   （若中途 Ctrl+C 中斷，已完成的當日報告會保留）")
     print("=" * 70)
     reishi = ReishiV5()
@@ -706,9 +937,19 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, quick: bool = Fal
     positions = []
     daily_records = []
     all_trades = []
+    est_per_day_sec = est_total_sec / n_days if n_days else 0
+    step_log_path = os.path.join(output_dir, "REIKAN_steps.log")
+    step_log_file = open(step_log_path, "w", encoding="utf-8")
+    step_log_file.write(f"[{datetime.now().isoformat()}] 回測開始 {start_date} ~ {end_date} 共 {n_days} 日 每日 {stock_count} 檔\n")
+    step_log_file.flush()
+    def _step_log(msg):
+        step_log_file.write(f"[{datetime.now().isoformat()}] {msg}\n")
+        step_log_file.flush()
     for i, T in enumerate(trading_days):
         try:
             print(f"   [{i+1}/{len(trading_days)}] 正在處理 {T} …", flush=True)
+            if stock_count > 50:
+                print(f"    ⏳ 本日將先取得新聞（{stock_count} 檔）與市場數據（並行），需數分鐘，請勿中斷…", flush=True)
             day_start = time.time()
             prev_d = prev_trading_day(T)
             # Always use 90-day lookback window from prev_d (never collapse to start_d)
@@ -734,9 +975,13 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, quick: bool = Fal
             def _on_progress(step_i, total, name, pct):
                 flow_label = f"[Flow 步驟 {step_i}] {flow_steps[step_i - 1]}" if 1 <= step_i <= len(flow_steps) else ""
                 elapsed = time.time() - day_start
+                remaining_days = len(trading_days) - i - 1
+                avg_per_day = (elapsed / step_i * 7) if step_i > 0 else est_per_day_sec
+                overall_remaining_sec = remaining_days * avg_per_day
+                overall_str = f"，回測整體剩餘約 {overall_remaining_sec/60:.0f} 分鐘（未完成 {remaining_days} 日）" if remaining_days > 0 else ""
                 if pct >= 100:
                     remaining = (elapsed / step_i) * (total - step_i) if step_i > 0 else 0
-                    print(f"    細項 {step_i}/{total} {name} {flow_label} {pct}% (已用 {elapsed:.0f} 秒，本日預計剩餘約 {remaining:.0f} 秒)", flush=True)
+                    print(f"    細項 {step_i}/{total} {name} {flow_label} {pct}% (已用 {elapsed:.0f} 秒，本日預計剩餘約 {remaining:.0f} 秒{overall_str})", flush=True)
                 else:
                     msg = f"    細項 {step_i}/{total} {name} {flow_label} {pct}% (已用 {elapsed:.0f} 秒，請稍候…)"
                     if step_i == 7 and pct == 0:
@@ -745,6 +990,7 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, quick: bool = Fal
                         completed = max(1, step_i - 1)
                         remaining = (elapsed / completed) * (total - step_i + 1) if completed > 0 else 0
                         msg += f"，本日預計剩餘約 {remaining:.0f} 秒"
+                    msg += overall_str
                     print(msg, flush=True)
             def _on_ticker(ticker, idx, total):
                 print(f"    [Flow 步驟 1] 數據獲取: 正在取得 {ticker} ({idx}/{total}) …", flush=True)
@@ -753,19 +999,41 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, quick: bool = Fal
                 print(f"    細項 {step_i}/7 {flow_name}: {message}", flush=True)
             def _on_llm_progress(phase, total, message, provider=None):
                 if provider:
-                    print(f"    決策引擎 LLM 第 {phase}/{total} 次（{message}）完成，使用 {provider}", flush=True)
+                    print(f"    LLM：{provider} 完成「{message}」（第 {phase}/{total} 階段）", flush=True)
                 else:
-                    print(f"    決策引擎 LLM 第 {phase}/{total} 次（{message}）…", flush=True)
+                    print(f"    LLM：第 {phase}/{total} 階段「{message}」進行中…", flush=True)
             try:
-                # When flow_logger is set, omit per-ticker/step callbacks to avoid duplicate lines (FlowLogger already prints ├ 正在取得/掃描/分析)
-                decision, all_analyses = reishi.run_daily_for_backtest(
-                    prev_d, backtest_start_eff, quick=quick, full_universe=full_universe, silent=True,
-                    on_progress=_on_progress, on_llm_progress=_on_llm_progress,
-                    on_ticker=None if flow_logger else _on_ticker,
-                    on_step_activity=None if flow_logger else _on_step_activity,
-                    flow_logger=flow_logger,
-                    report_dir=daily_report_dir,
-                )
+                _step_log(f"日 {i+1}/{n_days} {T} 開始")
+                pre_fetched = None
+                if use_local_data:
+                    tickers_for_day = reishi._get_scan_tickers(cap=stock_count)
+                    pre_fetched = read_local_market_data_for_date(prev_d, tickers_for_day, lookback_days=90)
+                    if not pre_fetched:
+                        print(f"   ⚠ 本地無 {prev_d} 的 K 線數據，請先執行「數據管理」下載該區間")
+                        decision, all_analyses = None, None
+                    else:
+                        decision, all_analyses = reishi.run_daily_for_backtest(
+                            prev_d, backtest_start_eff, stock_count=stock_count, silent=True,
+                            on_progress=_on_progress, on_llm_progress=_on_llm_progress,
+                            on_ticker=None if flow_logger else _on_ticker,
+                            on_step_activity=None if flow_logger else _on_step_activity,
+                            flow_logger=flow_logger,
+                            report_dir=daily_report_dir,
+                            step_log=_step_log,
+                            day_index=i, total_days=n_days, day_start_ts=day_start, est_per_day_sec=est_per_day_sec,
+                            pre_fetched_market_data=pre_fetched,
+                        )
+                else:
+                    decision, all_analyses = reishi.run_daily_for_backtest(
+                        prev_d, backtest_start_eff, stock_count=stock_count, silent=True,
+                        on_progress=_on_progress, on_llm_progress=_on_llm_progress,
+                        on_ticker=None if flow_logger else _on_ticker,
+                        on_step_activity=None if flow_logger else _on_step_activity,
+                        flow_logger=flow_logger,
+                        report_dir=daily_report_dir,
+                        step_log=_step_log,
+                        day_index=i, total_days=n_days, day_start_ts=day_start, est_per_day_sec=est_per_day_sec,
+                    )
             except Exception as e:
                 print(f"   ⚠ 日 {T} 決策錯誤: {e}")
                 decision = None
@@ -842,12 +1110,22 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, quick: bool = Fal
             if (i + 1) % 5 == 0 or i == 0:
                 print(f"   [{i+1}/{len(trading_days)}] {T} 組合 {portfolio_value:.0f} 報酬 {return_pct:+.2f}%", flush=True)
         except KeyboardInterrupt:
+            try:
+                _step_log("回測中斷 (Ctrl+C)")
+                step_log_file.close()
+            except Exception:
+                pass
             output_dir_partial = f"reports/backtest_range/{start_date}_to_{end_date}_interrupted_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             engine.daily_records = daily_records
             engine.trades = all_trades
             summary_path, trades_path = engine.save_results(output_dir_partial)
             print("\n⚠ 已中斷 (Ctrl+C)，部分報告已寫入: {} , {}".format(summary_path or "", trades_path or ""), flush=True)
             raise
+    try:
+        _step_log("回測完成")
+        step_log_file.close()
+    except Exception:
+        pass
     output_dir = f"reports/backtest_range/{start_date}_to_{end_date}"
     engine.daily_records = daily_records
     engine.trades = all_trades
@@ -863,13 +1141,26 @@ def main():
     parser.add_argument('--stats', action='store_true', help='显示统计信息')
     parser.add_argument('--backtest', nargs='*', metavar=('START_DATE', 'END_DATE'),
                         help='运行回测（逐日 v5.0 流程）。不传日期则用默认区间（约最近 90 天）；传两个日期则用 YYYY-MM-DD YYYY-MM-DD')
-    parser.add_argument('--quick', action='store_true', help='回测时小回测（每日 20 档）')
-    parser.add_argument('--full-universe', action='store_true', help='回测时大回测（从美股池取约 50 档）')
+    parser.add_argument('--stock-count', type=int, default=20, help='每日扫描股票数量（预设 20，输入 0 或超大数值则扫描全美股）')
     
     args = parser.parse_args()
     
-    # 回测模式：v5.0 大回测／小回测（逐日跑 v5.0 流程）
+    # 回测模式（命令列）
     if args.backtest is not None:
+        # 讀取美股總數
+        us_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "us_universe.csv")
+        total_us_stocks = 7055
+        if os.path.isfile(us_path):
+            try:
+                with open(us_path, "r", encoding="utf-8") as f:
+                    total_us_stocks = sum(1 for _ in f) - 1
+            except Exception:
+                pass
+        stock_count = args.stock_count if args.stock_count > 0 else total_us_stocks
+        if stock_count >= total_us_stocks:
+            stock_count = total_us_stocks
+            print(f"📌 掃描全美股（{total_us_stocks} 檔）")
+        stock_count = max(1, stock_count)
         if len(args.backtest) == 2:
             start_date, end_date = args.backtest
         else:
@@ -884,9 +1175,7 @@ def main():
                 start_date = trading[0].strftime("%Y-%m-%d")
                 end_date = trading[-1].strftime("%Y-%m-%d")
             print(f"回测默认区间: {start_date} ~ {end_date}")
-        quick = getattr(args, "quick", False)
-        full_universe = getattr(args, "full_universe", False)
-        summary_path, trades_path = run_backtest_v5_full_range(start_date, end_date, quick=quick, full_universe=full_universe)
+        summary_path, trades_path = run_backtest_v5_full_range(start_date, end_date, stock_count=stock_count)
         if summary_path:
             print("\n" + "=" * 70)
             print("✅ 回测完成")
@@ -906,42 +1195,144 @@ def main():
             reishi.show_statistics()
         return
 
-    # 互動模式：先選 正常 mode 或 回測 mode（與 v4.3 一致）
+    # 互動模式：v5.1 主選單
+    global _interactive_run_id
+    _interactive_run_id = str(int(time.time() * 1000))
     print(BANNER_V5)
     print("\n請選擇運行模式：")
-    print("  [1] 正常 mode — 今日決策（持倉 + 當天思考）")
-    print("  [2] 回測 mode — 歷史回放（測試策略）")
+    print("  [1] 正常 mode — 今日決策")
+    print("  [2] 回測 mode — 歷史回放")
+    print("  [3] 數據管理 — 下載／檢查歷史數據")
     print("  [0] 顯示命令列參數說明")
-    choice = input("\n請輸入選項 [1/2/0]: ").strip()
+    choice = input("\n請輸入選項 [1/2/3/0]: ").strip()
+    # #region agent log
+    _debug_log({"location": "main_v5.py:menu", "message": "main_menu_choice", "data": {"choice": choice}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session", "hypothesisId": "H1", "runId": _interactive_run_id})
+    # #endregion
 
     if choice == "1":
         run_dir = _create_run_dir_v5()
         log_file, original_stdout = _start_log_v5(run_dir)
         try:
             print(f"\n📁 本次報告目錄: {run_dir}")
+            # 預計運行時間（正常模式：約 20 檔，每檔 1.5 秒 + LLM 90 秒）
+            stock_count = 20
+            est_sec = stock_count * 1.5 + 90
+            print(f"⏱ 預計運行時間：約 {est_sec/60:.1f} 分鐘（{stock_count} 檔股票）")
             print("🔮 啟動霊視，洞察市場...\n")
             reishi = ReishiV5()
             reishi.run_daily()
         finally:
             _stop_log_v5(log_file, original_stdout)
+        _run_summary("choice=1 daily_done")
 
     elif choice == "2":
         print("\n📅 回測模式")
-        print("  請選擇回測規模：")
-        print("    [1] 大回測 — 從美股池取樣（每日約 50 檔，可設 V5_BACKTEST_FULL_CAP）")
-        print("    [2] 小回測 — 快速測試（每日 20 檔美股）")
-        choice2 = input("  請輸入 [1/2]: ").strip()
-        quick = choice2 == "2"  # 小回測 = quick
-        full_universe = choice2 == "1"  # 大回測 = 從美股池取
-        start_str = input("  請輸入開始日期（YYYY-MM-DD 或 YYYYMMDD）：").strip().replace(" ", "")
-        end_str = input("  請輸入結束日期（YYYY-MM-DD 或 YYYYMMDD）：").strip().replace(" ", "")
+        print("  [A] 本地數據回測（推薦）— 使用預下載數據，速度快")
+        print("  [B] 即時數據回測 — 每日即時拉取，限 1–7 天，用於驗證程式運行")
+        sub = input("請選擇 [A/B]: ").strip().upper()
+        # #region agent log
+        _debug_log({"location": "main_v5.py:backtest_sub", "message": "backtest_sub_choice", "data": {"sub": sub, "valid": sub in ("A", "B")}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session", "hypothesisId": "H1", "runId": _interactive_run_id})
+        # #endregion
+        if sub not in ("A", "B"):
+            _run_summary(f"choice=2 sub=invalid value={sub!r}")
+            print("❌ 請輸入 A 或 B")
+            return
+        # 讀取美股總數
+        us_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "us_universe.csv")
+        total_us_stocks = 7055
+        if os.path.isfile(us_path):
+            try:
+                with open(us_path, "r", encoding="utf-8-sig") as f:
+                    total_us_stocks = sum(1 for _ in f) - 1
+            except Exception:
+                pass
 
         def _norm_date(s):
-            s = s.strip()
+            s = s.strip().replace(" ", "")
             if len(s) == 8 and s.isdigit():
                 return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
             return s
 
+        if sub == "A":
+            from core.data_manager import check_data_sufficient, run_data_management_ui
+            print("\n  目前 2015–2025 的回測數據最完整；請先於「數據管理」下載所需區間。")
+            start_str = input("  請輸入開始日期（YYYY-MM-DD 或 YYYYMMDD）：").strip()
+            end_str = input("  請輸入結束日期（YYYY-MM-DD 或 YYYYMMDD）：").strip()
+            if not start_str or not end_str:
+                _run_summary("choice=2 sub=A error=missing_dates")
+                print("❌ 未輸入日期")
+                return
+            try:
+                start_dt = datetime.strptime(_norm_date(start_str), "%Y-%m-%d").date()
+                end_dt = datetime.strptime(_norm_date(end_str), "%Y-%m-%d").date()
+            except ValueError:
+                _run_summary("choice=2 sub=A error=invalid_date_format")
+                print("❌ 日期格式錯誤，請用 YYYY-MM-DD 或 YYYYMMDD")
+                return
+            if start_dt >= end_dt:
+                _run_summary("choice=2 sub=A error=end_before_start")
+                print("❌ 結束日期必須晚於開始日期")
+                return
+            sufficient, msg, relevant = check_data_sufficient(start_dt, end_dt)
+            # #region agent log
+            _debug_log({"location": "main_v5.py:check_sufficient", "message": "check_data_sufficient_result", "data": {"sufficient": sufficient, "msg": msg, "start_dt": str(start_dt), "end_dt": str(end_dt), "relevant_years": [r.year for r in relevant], "statuses": [r.status for r in relevant]}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session", "hypothesisId": "H2", "runId": _interactive_run_id})
+            # #endregion
+            print(f"  {msg}")
+            if not sufficient:
+                print("  [R] 修復後再回測  [P] 用現有數據繼續  [C] 換區間")
+                action = input("請選擇 [R/P/C]: ").strip().upper()
+                if action == "C":
+                    _run_summary(f"choice=2 sub=A action=C sufficient=false")
+                    return
+                if action == "R":
+                    _run_summary("choice=2 sub=A action=R opening_data_management")
+                    run_data_management_ui()
+                    _run_summary("choice=2 sub=A action=R data_management_done")
+                    return
+                if action != "P":
+                    print("將使用現有數據繼續（可能缺部分標的）")
+            stock_count_str = input(f"  每日掃描股票數量（預設 20，all=全美股 {total_us_stocks}）：").strip()
+            stock_count = total_us_stocks if (stock_count_str.lower() == "all" or not stock_count_str) else (int(stock_count_str) if stock_count_str.isdigit() else 20)
+            stock_count = max(1, min(stock_count, total_us_stocks))
+            from core.backtest_engine import get_trading_days
+            trading = get_trading_days(start_dt, end_dt)
+            n_days = len(trading)
+            est_per_day_sec = 15 * 60  # 約 15 分/天
+            est_total_sec = n_days * est_per_day_sec
+            est_hr = est_total_sec / 3600
+            est_str = f"約 {est_hr:.1f} 小時" if est_hr >= 1 else f"約 {est_total_sec/60:.0f} 分鐘"
+            print(f"\n🔮 啟動霊視本地回測（{start_dt} ~ {end_dt}）")
+            print(f"   📊 每日掃描 {stock_count} 檔，共 {n_days} 個交易日")
+            print(f"   ⏱ 預計運行時間：{est_str}（每日約 15–20 分鐘）\n")
+            backtest_run_dir = os.path.join("reports", "backtest_range", f"{start_dt.strftime('%Y-%m-%d')}_to_{end_dt.strftime('%Y-%m-%d')}")
+            os.makedirs(backtest_run_dir, exist_ok=True)
+            log_file_bt, original_stdout_bt = _start_log_v5(backtest_run_dir, log_name="REIKAN_run.log")
+            # #region agent log
+            _debug_log({"location": "main_v5.py:before_local_backtest", "message": "about_to_run_local_backtest", "data": {"start": start_dt.strftime("%Y-%m-%d"), "end": end_dt.strftime("%Y-%m-%d"), "stock_count": stock_count}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session", "hypothesisId": "H3", "runId": _interactive_run_id})
+            # #endregion
+            _run_summary(f"choice=2 sub=A backtest_started start={start_dt} end={end_dt} stock_count={stock_count} local=true")
+            try:
+                summary_path, trades_path = run_backtest_v5_full_range(
+                    start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"), stock_count=stock_count, use_local_data=True
+                )
+            finally:
+                _stop_log_v5(log_file_bt, original_stdout_bt)
+            if summary_path:
+                _run_summary(f"choice=2 sub=A backtest_ok summary={summary_path} trades={trades_path}")
+                print("\n" + "=" * 70)
+                print("✅ 回測完成")
+                print(f"📄 摘要: {summary_path}")
+                print(f"📄 交易: {trades_path}")
+                print("=" * 70)
+            else:
+                _run_summary("choice=2 sub=A backtest_done no_summary")
+        return
+        # [B] 即時數據回測
+        start_str = input("  請輸入開始日期（YYYY-MM-DD 或 YYYYMMDD）：").strip().replace(" ", "")
+        end_str = input("  請輸入結束日期（YYYY-MM-DD 或 YYYYMMDD）：").strip().replace(" ", "")
+        stock_count_str = input(f"  每日掃描股票數量（預設 20，all=全美股 {total_us_stocks}）：").strip()
+        stock_count = total_us_stocks if (stock_count_str.lower() == "all" or not stock_count_str) else (int(stock_count_str) if stock_count_str.isdigit() else 20)
+        stock_count = max(1, min(stock_count, total_us_stocks))
         try:
             from core.backtest_engine import get_trading_days
             start_dt = datetime.strptime(_norm_date(start_str), "%Y-%m-%d").date()
@@ -951,43 +1342,70 @@ def main():
                 return
             trading = get_trading_days(start_dt, end_dt)
             n_days = len(trading)
-            mode_str = "小回測（20 檔/日）" if quick else "大回測（美股池約 50 檔/日）"
-            print(f"\n🔮 啟動霊視回測 — {mode_str}（{start_dt} ~ {end_dt}），共 {n_days} 個交易日，選定後開始執行...\n")
-            # 美學：回測時也 tee 到報告目錄的 log
+            if n_days > 7:
+                print(f"⚠ 即時回測建議不超過 7 天（目前 {n_days} 天）。建議改用 [A] 本地數據回測。")
+                if input("仍要繼續？[y/N]: ").strip().lower() != "y":
+                    return
+            est_per_day_sec = stock_count * 1.5 + 90
+            est_total_sec = n_days * est_per_day_sec
+            est_min = est_total_sec / 60
+            est_hr = est_min / 60
+            est_str = f"約 {est_hr:.1f} 小時" if est_hr >= 1 else f"約 {est_min:.0f} 分鐘"
+            print(f"\n🔮 啟動霊視即時回測（{start_dt} ~ {end_dt}）")
+            print(f"   📊 每日掃描 {stock_count} 檔，共 {n_days} 個交易日")
+            print(f"   ⏱ 預計運行時間：{est_str}（每日約 {est_per_day_sec/60:.1f} 分鐘）\n")
             backtest_run_dir = os.path.join("reports", "backtest_range", f"{start_dt.strftime('%Y-%m-%d')}_to_{end_dt.strftime('%Y-%m-%d')}")
             os.makedirs(backtest_run_dir, exist_ok=True)
             log_file_bt, original_stdout_bt = _start_log_v5(backtest_run_dir, log_name="REIKAN_run.log")
             try:
                 summary_path, trades_path = run_backtest_v5_full_range(
-                    start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"), quick=quick, full_universe=full_universe
+                    start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"), stock_count=stock_count, use_local_data=False
                 )
             finally:
                 _stop_log_v5(log_file_bt, original_stdout_bt)
             if summary_path:
+                _run_summary(f"choice=2 sub=B backtest_ok summary={summary_path} trades={trades_path}")
                 print("\n" + "=" * 70)
                 print("✅ 回測完成")
                 print(f"📄 摘要: {summary_path}")
                 print(f"📄 交易: {trades_path}")
                 print("=" * 70)
+            else:
+                _run_summary("choice=2 sub=B backtest_done no_summary")
         except ValueError:
+            _run_summary("choice=2 sub=B error=invalid_date_format")
             print("❌ 日期格式錯誤，請用 YYYY-MM-DD 或 YYYYMMDD")
         except Exception as e:
+            _run_summary(f"choice=2 sub=B ERROR {e!r}")
             print(f"❌ 回測錯誤: {e}")
             import traceback
             traceback.print_exc()
 
+    elif choice == "3":
+        _run_summary("choice=3 data_management_enter")
+        try:
+            from core.data_manager import run_data_management_ui
+            run_data_management_ui()
+            _run_summary("choice=3 data_management_done")
+        except Exception as e:
+            _run_summary(f"choice=3 ERROR {type(e).__name__}: {e!r}")
+            raise
+
     elif choice == "0":
+        _run_summary("choice=0 help")
         print("\n" + "=" * 50)
         print("📋 命令列參數說明")
         print("=" * 50)
         print("  python main_v5.py --daily    # 每日分析")
         print("  python main_v5.py --monitor  # 即時監控")
         print("  python main_v5.py --stats    # 統計資訊")
-        print("  python main_v5.py --backtest [START END] [--quick] [--full-universe]  # 回測（不傳日期則預設約 90 天）")
-        print("    --quick = 小回測（20 檔/日），--full-universe = 大回測（美股池約 50 檔/日）")
+        print("  python main_v5.py --backtest [START END] [--stock-count N]  # 回測")
+        print("    不傳日期則預設約 90 天")
+        print("    --stock-count N  設定每日掃描股票數量（預設 20，輸入 0 或超大值則掃描全美股約 7000 檔）")
         print("=" * 50)
     else:
-        print("❌ 無效選項，請重新執行並選擇 1/2/0")
+        _run_summary(f"choice=invalid value={choice!r}")
+        print("❌ 無效選項，請重新執行並選擇 1/2/3/0")
 
 
 # ---------------------------------------------------------------------------
@@ -1007,7 +1425,7 @@ BANNER_V5 = """
            ░░░░░░░░░░░░░░░░░░░░░░░░                     
          ░░░░░░░░░░░░░░░░░░░░░░░░░░░░                   
                                                                        
-                      v5.0 MVP
+                      v5.1
                                                                        
 ═══════════════════════════════════════════════════════════════════════
 """
