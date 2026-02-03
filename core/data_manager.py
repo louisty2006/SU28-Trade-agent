@@ -1,5 +1,5 @@
 """
-REISHI v5.1.2 - 本地數據管理
+REISHI v5.2 - 本地數據管理
 
 - K 線：data/market_data/us_stocks/YYYY.parquet + metadata.json
 - 新聞：data/news_data/ + metadata.json（GDELT/SEC/CommonCrawl 等）
@@ -702,7 +702,7 @@ def run_data_management_ui():
         kline_status = get_kline_status()
         news_status = get_news_status()
         print("\n" + "=" * 60)
-        print("📁 REISHI v5.1.2 數據管理")
+        print("📁 REISHI v5.2 數據管理")
         print("=" * 60)
         print(format_kline_table(kline_status))
         print()

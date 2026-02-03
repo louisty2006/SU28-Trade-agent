@@ -920,7 +920,7 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, stock_count: int 
     else:
         est_str = f"約 {est_min:.0f} 分鐘"
     print("\n" + "=" * 70)
-    print(f"🔗 REISHI v5.1 回测（逐日 v5.0 流程）— 每日 {stock_count} 檔" + (" [本地數據]" if use_local_data else ""))
+    print(f"🔗 REISHI v5.2 回测（逐日 v5.0 流程）— 每日 {stock_count} 檔" + (" [本地數據]" if use_local_data else ""))
     print("=" * 70)
     print(f"📅 期間: {start_date} → {end_date}，共 {n_days} 個交易日")
     print(f"💰 初始資金: {config.initial_cash:,.0f} HKD")
@@ -1425,7 +1425,7 @@ BANNER_V5 = """
            ░░░░░░░░░░░░░░░░░░░░░░░░                     
          ░░░░░░░░░░░░░░░░░░░░░░░░░░░░                   
                                                                        
-                      v5.1.2
+                      v5.2
                                                                        
 ═══════════════════════════════════════════════════════════════════════
 """
