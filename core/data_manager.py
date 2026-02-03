@@ -275,7 +275,7 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
     """
     修復或下載指定年份 K 線數據。
     依賴現有 data_sources / data_fetcher，寫入 parquet 並更新 metadata。
-    on_progress(msg) 可選，用於顯示進度。
+    on_progress(msg, same_line=False) 可選：same_line=True 時同一行 \\r 更新（進度條），否則換行輸出。
     """
     _ensure_dirs()
     import pandas as pd
@@ -292,7 +292,7 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
                     tickers.append(s)
     if not tickers:
         if callable(on_progress):
-            on_progress("us_universe.csv 無標的，跳過下載")
+            _invoke_progress(on_progress, "us_universe.csv 無標的，跳過下載", False)
         return False
     total = len(tickers)
     rows = []
@@ -300,19 +300,40 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
         from utils.data_sources import get_daily_bars
     except ImportError:
         if callable(on_progress):
-            on_progress("無法載入 data_sources，請安裝依賴")
+            _invoke_progress(on_progress, "無法載入 data_sources，請安裝依賴", False)
         return False
-    for i, t in enumerate(tickers):
-        if callable(on_progress) and (i + 1) % 500 == 0:
-            on_progress(f"下載 {year}：{i+1}/{total} {t}")
-        df = get_daily_bars(t, start_d, end_d, min_bars=1, merge_sources=True)
-        if df is not None and not df.empty:
-            df = df.copy()
-            df["symbol"] = t
-            rows.append(df)
+    # 抑制 yfinance「possibly delisted」等訊息，避免下載時洗版（與 main_v5 取數時一致）
+    import logging
+    _yf_log = logging.getLogger("yfinance")
+    _yf_prev_level = _yf_log.level
+    _yf_log.setLevel(logging.ERROR)
+    _yf_log.disabled = True
+    _bar_width = 24
+    if callable(on_progress):
+        _invoke_progress(on_progress, f"開始 {year}（共 {total} 檔）", False)
+    try:
+        for i, t in enumerate(tickers):
+            done = i + 1
+            remaining = total - done
+            pct = done / total if total else 0
+            filled = int(_bar_width * pct)
+            bar = "[" + "#" * filled + "-" * (_bar_width - filled) + "]"
+            line = f"{bar} {pct*100:.0f}% 已下載 {len(rows)} 股，餘下 {remaining} 股未處理  當前: {t}"
+            if callable(on_progress):
+                _invoke_progress(on_progress, line, True)
+            df = get_daily_bars(t, start_d, end_d, min_bars=1, merge_sources=True)
+            if df is not None and not df.empty:
+                df = df.copy()
+                df["symbol"] = t
+                rows.append(df)
+    finally:
+        _yf_log.disabled = False
+        _yf_log.setLevel(_yf_prev_level)
+    if callable(on_progress):
+        _invoke_progress(on_progress, "", False)  # 換行，結束 \r 同一行
     if not rows:
         if callable(on_progress):
-            on_progress(f"{year} 無可寫入數據")
+            _invoke_progress(on_progress, f"{year} 無可寫入數據", False)
         return False
     combined = pd.concat(rows, ignore_index=True)
     out_path = os.path.join(MARKET_STOCKS_DIR, f"{year}.parquet")
@@ -329,8 +350,27 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
     }
     save_market_metadata(meta)
     if callable(on_progress):
-        on_progress(f"{year} 完成：{combined['symbol'].nunique()} 檔，{len(combined)} 筆，{size_mb:.1f} MB")
+        _invoke_progress(on_progress, f"{year} 完成：{combined['symbol'].nunique()} 檔，{len(combined)} 筆，{size_mb:.1f} MB", False)
     return True
+
+
+def _invoke_progress(on_progress, msg: str, same_line: bool):
+    """呼叫 on_progress(msg, same_line)。若 callback 只接受一參數則僅傳 msg（相容舊用法）。"""
+    try:
+        on_progress(msg, same_line)
+    except TypeError:
+        if same_line:
+            import sys
+            pad = " " * max(0, 90 - len(msg))
+            sys.stdout.write(f"\r  {msg}{pad}")
+            sys.stdout.flush()
+        else:
+            if msg:
+                on_progress(msg)
+            else:
+                import sys
+                sys.stdout.write("\n")
+                sys.stdout.flush()
 
 
 def validate_integrity() -> List[str]:
@@ -448,8 +488,22 @@ def run_data_management_ui():
             print("下載 2005-2025 共 21 年，耗時較長")
             if input("確認？[y/N]: ").strip().lower() != "y":
                 continue
-            for y in range(2005, 2026):
-                repair_or_download_year(str(y), on_progress=lambda m: print(f"  {m}"))
+            years_list = list(range(2005, 2026))
+            n_years = len(years_list)
+            for idx, y in enumerate(years_list, 1):
+                def _progress(msg, same_line=False, _yr=y, _i=idx, _n=n_years):
+                    prefix = f"  [{_i}/{_n}] {_yr} "
+                    if same_line:
+                        pad = " " * max(0, 95 - len(prefix) - len(msg))
+                        print(f"\r{prefix}{msg}{pad}", end="", flush=True)
+                    else:
+                        if msg:
+                            print(f"{prefix}{msg}", flush=True)
+                        else:
+                            print(flush=True)
+                print(f"  [{idx}/{n_years}] 開始年份 {y} …", flush=True)
+                repair_or_download_year(str(y), on_progress=_progress)
+            print("  全部 21 年下載完成。", flush=True)
             continue
         if choice == "C":
             from datetime import date as dt_date
