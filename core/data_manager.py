@@ -273,10 +273,11 @@ def diagnose_year(year: str) -> Dict[str, Any]:
 
 def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -> bool:
     """
-    修復或下載指定年份 K 線數據。支援續跑：
+    修復或下載指定年份 K 線數據。支援續跑與並行：
     - 年度續跑：若該年 parquet 已存在且完整（≥99% 標的）則跳過，不重下。
     - 單年內續跑：若該年 parquet 已存在但未完整，只下載「尚未有的標的」並合併；每 50 檔寫入一次 partial。
-    中斷後（如 Ctrl+C）：直接再次執行同一年或 [B] 完整下載，會從上次寫入的 partial 繼續，無需重頭下載。
+    - 並行下載：預設 8 緒同時下載，加快速度；失敗的標的會自動順序補下載一次（間隔 1s），仍失敗的留待下次續跑再試。
+    中斷後（如 Ctrl+C）：直接再次執行同一年或 [B]，會從上次 partial 繼續。
     """
     _ensure_dirs()
     import pandas as pd
@@ -334,34 +335,74 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
     _yf_log.setLevel(logging.ERROR)
     _yf_log.disabled = True
     _bar_width = 20
-    _max_line = 88
+    _max_line = PROGRESS_LINE_WIDTH - 18
     _checkpoint_every = 50
+    _max_workers = 8
+    _retry_delay_sec = 1.0
     if callable(on_progress):
         if have_count:
-            _invoke_progress(on_progress, f"續跑 {year}：已有 {have_count} 檔，待補 {len(tickers_to_fetch)} 檔（可隨時 Ctrl+C，下次執行會從此進度續跑）", False)
+            _invoke_progress(on_progress, f"續跑 {year}：已有 {have_count} 檔，待補 {len(tickers_to_fetch)} 檔（並行 {_max_workers}，可隨時 Ctrl+C，下次續跑）", False)
         else:
-            _invoke_progress(on_progress, f"開始 {year}（共 {total} 檔；可隨時 Ctrl+C，下次執行會從此進度續跑）", False)
+            _invoke_progress(on_progress, f"開始 {year}（共 {total} 檔，並行 {_max_workers}；可隨時 Ctrl+C，下次續跑）", False)
     rows = []
+    failed_tickers = []
     try:
-        for i, t in enumerate(tickers_to_fetch):
-            downloaded_so_far = have_count + len(rows)
-            remaining = total - downloaded_so_far
-            pct = (downloaded_so_far + 1) / total if total else 0
-            filled = min(_bar_width, int(_bar_width * pct))
-            bar = "[" + "#" * filled + "-" * (_bar_width - filled) + "]"
-            pct_str = f"{pct*100:.1f}%" if pct < 0.01 else f"{pct*100:.0f}%"
-            line = f"{bar} {pct_str} 已下載 {downloaded_so_far} 餘 {remaining} 當前:{t}"
-            if len(line) > _max_line:
-                line = line[:_max_line - 3] + "..."
-            if callable(on_progress):
-                _invoke_progress(on_progress, line, True)
-            df = get_daily_bars(t, start_d, end_d, min_bars=1, merge_sources=True)
-            if df is not None and not df.empty:
-                df = df.copy()
-                df["symbol"] = t
-                rows.append(df)
-            if rows and len(rows) % _checkpoint_every == 0:
-                _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _fetch_one(ticker: str):
+            try:
+                df = get_daily_bars(ticker, start_d, end_d, min_bars=1, merge_sources=True)
+                if df is not None and not df.empty:
+                    df = df.copy()
+                    df["symbol"] = ticker
+                    return (ticker, df)
+            except Exception:
+                pass
+            return (ticker, None)
+
+        with ThreadPoolExecutor(max_workers=_max_workers) as executor:
+            futures = {executor.submit(_fetch_one, t): t for t in tickers_to_fetch}
+            for future in as_completed(futures):
+                ticker, df = future.result()
+                if df is not None:
+                    rows.append(df)
+                    downloaded_so_far = have_count + len(rows)
+                    remaining = total - downloaded_so_far
+                    pct = downloaded_so_far / total if total else 0
+                    filled = min(_bar_width, int(_bar_width * pct))
+                    bar = "[" + "#" * filled + "-" * (_bar_width - filled) + "]"
+                    pct_str = f"{pct*100:.1f}%" if pct < 0.01 else f"{pct*100:.0f}%"
+                    line = f"{bar} {pct_str} 已下載 {downloaded_so_far} 餘 {remaining} 當前:{ticker}"
+                    if len(line) > _max_line:
+                        line = line[:_max_line - 3] + "..."
+                    if callable(on_progress):
+                        _invoke_progress(on_progress, line, True)
+                    if len(rows) % _checkpoint_every == 0:
+                        _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress)
+                else:
+                    failed_tickers.append(ticker)
+        # 補下載：失敗的改為順序重試一次，間隔 _retry_delay_sec，避免第三方限流後立刻再打
+        rows_before_retry = len(rows)
+        if failed_tickers and callable(on_progress):
+            _invoke_progress(on_progress, f"  補下載 {len(failed_tickers)} 檔（順序重試，間隔 {_retry_delay_sec}s）…", False)
+        import time
+        for t in failed_tickers:
+            try:
+                time.sleep(_retry_delay_sec)
+                df = get_daily_bars(t, start_d, end_d, min_bars=1, merge_sources=True)
+                if df is not None and not df.empty:
+                    df = df.copy()
+                    df["symbol"] = t
+                    rows.append(df)
+                    if callable(on_progress):
+                        _invoke_progress(on_progress, f"  補下載成功: {t}", False)
+                    if len(rows) % _checkpoint_every == 0:
+                        _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress)
+            except Exception:
+                pass
+        still_failed = len(failed_tickers) - (len(rows) - rows_before_retry)
+        if still_failed > 0 and callable(on_progress):
+            _invoke_progress(on_progress, f"  本輪未成功 {still_failed} 檔，下次執行續跑會自動再試", False)
     finally:
         _yf_log.disabled = False
         _yf_log.setLevel(_yf_prev_level)
@@ -431,6 +472,10 @@ def _write_partial(year: str, existing_df, rows, out_path, start_d, end_d, on_pr
         _invoke_progress(on_progress, f"  → 已寫入 partial（{n_stocks} 檔）", False)
 
 
+# 進度列單行最大寬度，避免 \r 覆蓋時換行殘影
+PROGRESS_LINE_WIDTH = 100
+
+
 def _invoke_progress(on_progress, msg: str, same_line: bool):
     """呼叫 on_progress(msg, same_line)。若 callback 只接受一參數則僅傳 msg（相容舊用法）。"""
     try:
@@ -438,8 +483,9 @@ def _invoke_progress(on_progress, msg: str, same_line: bool):
     except TypeError:
         if same_line:
             import sys
-            pad = " " * max(0, 90 - len(msg))
-            sys.stdout.write(f"\r  {msg}{pad}")
+            msg_trim = msg[:PROGRESS_LINE_WIDTH - 2] if len(msg) > PROGRESS_LINE_WIDTH - 2 else msg
+            pad = " " * max(0, PROGRESS_LINE_WIDTH - 2 - len(msg_trim))
+            sys.stdout.write(f"\r  {msg_trim}{pad}")
             sys.stdout.flush()
         else:
             if msg:
@@ -571,10 +617,11 @@ def run_data_management_ui():
                 def _progress(msg, same_line=False, _yr=y, _i=idx, _n=n_years):
                     prefix = f"  [{_i}/{_n}] {_yr} "
                     if same_line:
-                        # 固定單行總長 100，避免換行後 \r 只清當行造成殘影
-                        total_len = 100
-                        pad = " " * max(0, total_len - len(prefix) - len(msg))
-                        print(f"\r{prefix}{msg}{pad}", end="", flush=True)
+                        full = prefix + msg
+                        if len(full) > PROGRESS_LINE_WIDTH:
+                            full = full[: PROGRESS_LINE_WIDTH - 1] + "…"
+                        pad = " " * max(0, PROGRESS_LINE_WIDTH - len(full))
+                        print(f"\r{full}{pad}", end="", flush=True)
                     else:
                         if msg:
                             print(f"{prefix}{msg}", flush=True)
