@@ -275,7 +275,7 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
     """
     修復或下載指定年份 K 線數據。支援續跑：
     - 年度續跑：若該年 parquet 已存在且完整（≥99% 標的）則跳過，不重下。
-    - 單年內續跑：若該年 parquet 已存在但未完整，只下載「尚未有的標的」並合併；每 500 檔寫入一次 partial。
+    - 單年內續跑：若該年 parquet 已存在但未完整，只下載「尚未有的標的」並合併；每 50 檔寫入一次 partial。
     中斷後（如 Ctrl+C）：直接再次執行同一年或 [B] 完整下載，會從上次寫入的 partial 繼續，無需重頭下載。
     """
     _ensure_dirs()
@@ -335,7 +335,7 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
     _yf_log.disabled = True
     _bar_width = 20
     _max_line = 88
-    _checkpoint_every = 500
+    _checkpoint_every = 50
     if callable(on_progress):
         if have_count:
             _invoke_progress(on_progress, f"續跑 {year}：已有 {have_count} 檔，待補 {len(tickers_to_fetch)} 檔（可隨時 Ctrl+C，下次執行會從此進度續跑）", False)
@@ -410,7 +410,7 @@ def _concat_existing_and_rows(existing_df, rows):
 
 
 def _write_partial(year: str, existing_df, rows, out_path, start_d, end_d, on_progress):
-    """每 N 檔寫入一次 partial parquet，中斷後下次可續跑。"""
+    """每 50 檔寫入一次 partial parquet，中斷後下次可續跑。"""
     combined = _concat_existing_and_rows(existing_df, rows)
     if combined is None or combined.empty:
         return
