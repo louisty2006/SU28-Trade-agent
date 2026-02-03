@@ -190,7 +190,7 @@ def get_kline_status() -> List[YearStatus]:
                 status_str = "complete"
             elif completeness > 0:
                 status_str = "partial"
-            result.append(YearStatus(
+            ys = YearStatus(
                 year=year_str,
                 status=status_str,
                 stocks_count=stocks_count,
@@ -198,7 +198,17 @@ def get_kline_status() -> List[YearStatus]:
                 size_mb=file_size_mb,
                 date_range=tuple(date_range) if isinstance(date_range, list) and len(date_range) >= 2 else None,
                 expected_stocks=expected,
-            ))
+            )
+            result.append(ys)
+            # #region agent log
+            if year_str == "2005":
+                try:
+                    payload = {"location": "data_manager:get_kline_status", "message": "result_2005", "stocks_count": stocks_count, "completeness_pct": round(completeness, 1), "from_meta": info.get("stocks_count"), "timestamp": int(__import__("time").time() * 1000), "sessionId": "debug-session", "hypothesisId": "H_status"}
+                    with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _f:
+                        _f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+            # #endregion
         else:
             result.append(YearStatus(
                 year=year_str,
@@ -241,12 +251,81 @@ def format_kline_table(rows: List[YearStatus]) -> str:
     return "\n".join(lines)
 
 
-def _print_kline_status_refresh():
-    """重新讀取 K 線狀態並列印表格，令用家立刻看到最新狀態（下載後或上次已下載）。"""
+def _get_one_year_status_from_disk(year: str) -> Optional[YearStatus]:
+    """從磁碟直接讀取該年 parquet 的狀態（不依賴 metadata），確保即時反映剛寫入的 partial。"""
+    _resolve_data_roots()
+    parquet_path = os.path.join(MARKET_STOCKS_DIR, f"{year}.parquet")
+    if not os.path.isfile(parquet_path):
+        return None
+    expected = get_universe_count()
+    try:
+        sz = os.path.getsize(parquet_path)
+        file_size_mb = round(sz / (1024 * 1024), 1)
+    except Exception:
+        file_size_mb = 0.0
+    try:
+        import pandas as pd
+        df = pd.read_parquet(parquet_path)
+        if "symbol" in df.columns:
+            stocks_count = int(df["symbol"].nunique())
+        elif "ticker" in df.columns:
+            stocks_count = int(df["ticker"].nunique())
+        else:
+            stocks_count = len(df)
+    except Exception:
+        return None
+    completeness = (stocks_count / expected * 100) if expected else 0
+    status_str = "complete" if completeness >= 99 else ("partial" if completeness > 0 else "none")
+    return YearStatus(
+        year=year,
+        status=status_str,
+        stocks_count=stocks_count,
+        completeness_pct=round(completeness, 1),
+        size_mb=file_size_mb,
+        date_range=None,
+        expected_stocks=expected,
+    )
+
+
+def _print_kline_status_one_line(year: str):
+    """下載中：從磁碟直接讀取該年 parquet 並印出該年一行，即時反映剛寫入的 partial（不依賴 metadata）。"""
+    s = _get_one_year_status_from_disk(year)
+    if s is None:
+        return
+    status_display = {"complete": "✓ 完整", "partial": "⚠ 部分", "none": "✗ 無"}.get(s.status, s.status)
+    size_str = f"{s.size_mb/1024:.1f} GB" if s.size_mb >= 1024 else f"{s.size_mb:.1f} MB"
+    line = f"  【即時】{s.year} {status_display} {s.stocks_count:,} 檔 {s.completeness_pct:.0f}% {size_str}"
+    try:
+        import sys
+        sys.stdout.write("\n" + line + "\n")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def _print_kline_status_refresh(during_download: bool = False):
+    """重新讀取 K 線狀態並列印表格，令用家立刻看到最新狀態（下載後或上次已下載）。during_download 時加標題方便辨識即時更新。"""
     status = get_kline_status()
+    # #region agent log
+    if during_download and status:
+        try:
+            s2005 = next((s for s in status if s.year == "2005"), None)
+            payload = {"location": "data_manager:_print_kline_status_refresh", "message": "refresh_during_download", "year_2005": {"stocks_count": getattr(s2005, "stocks_count", None), "completeness_pct": getattr(s2005, "completeness_pct", None), "status": getattr(s2005, "status", None)}, "timestamp": int(__import__("time").time() * 1000), "sessionId": "debug-session", "hypothesisId": "H_refresh"}
+            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _f:
+                _f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+    # #endregion
     print()
+    if during_download:
+        print("  【當前 K 線狀態】")
     print(format_kline_table(status))
     print()
+    try:
+        import sys
+        sys.stdout.flush()
+    except Exception:
+        pass
 
 
 def format_news_table(rows: List[Dict[str, Any]]) -> str:
@@ -481,6 +560,8 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
                                 _invoke_progress(on_progress, line, True)
                             if len(rows) <= 50 or len(rows) % _checkpoint_every == 0:
                                 _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress, parquet_engine)
+                                # 寫入後即時印出該年一行狀態，數字隨 partial 更新
+                                _print_kline_status_one_line(year)
                         else:
                             failed_tickers.append(ticker)
             except KeyboardInterrupt:
@@ -506,6 +587,7 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
                         _invoke_progress(on_progress, f"  補下載成功: {t}", False)
                     if len(rows) % _checkpoint_every == 0:
                         _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress, parquet_engine)
+                        _print_kline_status_one_line(year)
             except Exception:
                 pass
         still_failed = len(failed_tickers) - (len(rows) - rows_before_retry)
