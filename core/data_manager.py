@@ -273,9 +273,10 @@ def diagnose_year(year: str) -> Dict[str, Any]:
 
 def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -> bool:
     """
-    修復或下載指定年份 K 線數據。
-    依賴現有 data_sources / data_fetcher，寫入 parquet 並更新 metadata。
-    on_progress(msg, same_line=False) 可選：same_line=True 時同一行 \\r 更新（進度條），否則換行輸出。
+    修復或下載指定年份 K 線數據。支援續跑：
+    - 年度續跑：若該年 parquet 已存在且完整（≥99% 標的）則跳過，不重下。
+    - 單年內續跑：若該年 parquet 已存在但未完整，只下載「尚未有的標的」並合併；每 500 檔寫入一次 partial。
+    中斷後（如 Ctrl+C）：直接再次執行同一年或 [B] 完整下載，會從上次寫入的 partial 繼續，無需重頭下載。
     """
     _ensure_dirs()
     import pandas as pd
@@ -295,30 +296,63 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
             _invoke_progress(on_progress, "us_universe.csv 無標的，跳過下載", False)
         return False
     total = len(tickers)
-    rows = []
+    out_path = os.path.join(MARKET_STOCKS_DIR, f"{year}.parquet")
+    existing_df = None
+    have = set()
+    if os.path.isfile(out_path):
+        try:
+            existing_df = pd.read_parquet(out_path)
+            # 支援 symbol 或 ticker 欄位，方便與既有 parquet 相容
+            if "symbol" not in existing_df.columns and "ticker" in existing_df.columns:
+                existing_df = existing_df.copy()
+                existing_df["symbol"] = existing_df["ticker"]
+            if "symbol" in existing_df.columns:
+                have = set(existing_df["symbol"].unique())
+                # 年度續跑：已完整則跳過
+                if len(have) >= total * 0.99:
+                    if callable(on_progress):
+                        _invoke_progress(on_progress, f"{year} 已完整（{len(have)} 檔），跳過", False)
+                    return True
+        except Exception:
+            existing_df = None
+            have = set()
+    tickers_to_fetch = [t for t in tickers if t not in have]
+    have_count = len(have)
+    if not tickers_to_fetch:
+        if callable(on_progress):
+            _invoke_progress(on_progress, f"{year} 已完整，跳過", False)
+        return True
     try:
         from utils.data_sources import get_daily_bars
     except ImportError:
         if callable(on_progress):
             _invoke_progress(on_progress, "無法載入 data_sources，請安裝依賴", False)
         return False
-    # 抑制 yfinance「possibly delisted」等訊息，避免下載時洗版（與 main_v5 取數時一致）
     import logging
     _yf_log = logging.getLogger("yfinance")
     _yf_prev_level = _yf_log.level
     _yf_log.setLevel(logging.ERROR)
     _yf_log.disabled = True
-    _bar_width = 24
+    _bar_width = 20
+    _max_line = 88
+    _checkpoint_every = 500
     if callable(on_progress):
-        _invoke_progress(on_progress, f"開始 {year}（共 {total} 檔）", False)
+        if have_count:
+            _invoke_progress(on_progress, f"續跑 {year}：已有 {have_count} 檔，待補 {len(tickers_to_fetch)} 檔（可隨時 Ctrl+C，下次執行會從此進度續跑）", False)
+        else:
+            _invoke_progress(on_progress, f"開始 {year}（共 {total} 檔；可隨時 Ctrl+C，下次執行會從此進度續跑）", False)
+    rows = []
     try:
-        for i, t in enumerate(tickers):
-            done = i + 1
-            remaining = total - done
-            pct = done / total if total else 0
-            filled = int(_bar_width * pct)
+        for i, t in enumerate(tickers_to_fetch):
+            downloaded_so_far = have_count + len(rows)
+            remaining = total - downloaded_so_far
+            pct = (downloaded_so_far + 1) / total if total else 0
+            filled = min(_bar_width, int(_bar_width * pct))
             bar = "[" + "#" * filled + "-" * (_bar_width - filled) + "]"
-            line = f"{bar} {pct*100:.0f}% 已下載 {len(rows)} 股，餘下 {remaining} 股未處理  當前: {t}"
+            pct_str = f"{pct*100:.1f}%" if pct < 0.01 else f"{pct*100:.0f}%"
+            line = f"{bar} {pct_str} 已下載 {downloaded_so_far} 餘 {remaining} 當前:{t}"
+            if len(line) > _max_line:
+                line = line[:_max_line - 3] + "..."
             if callable(on_progress):
                 _invoke_progress(on_progress, line, True)
             df = get_daily_bars(t, start_d, end_d, min_bars=1, merge_sources=True)
@@ -326,32 +360,75 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
                 df = df.copy()
                 df["symbol"] = t
                 rows.append(df)
+            if rows and len(rows) % _checkpoint_every == 0:
+                _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress)
     finally:
         _yf_log.disabled = False
         _yf_log.setLevel(_yf_prev_level)
     if callable(on_progress):
-        _invoke_progress(on_progress, "", False)  # 換行，結束 \r 同一行
-    if not rows:
+        _invoke_progress(on_progress, "", False)
+    if not rows and existing_df is None:
         if callable(on_progress):
             _invoke_progress(on_progress, f"{year} 無可寫入數據", False)
         return False
-    combined = pd.concat(rows, ignore_index=True)
-    out_path = os.path.join(MARKET_STOCKS_DIR, f"{year}.parquet")
+    combined = _concat_existing_and_rows(existing_df, rows)
+    if combined is None or combined.empty:
+        return True
     combined.to_parquet(out_path, index=False)
     size_mb = os.path.getsize(out_path) / (1024 * 1024)
+    uniq_col = "symbol" if "symbol" in combined.columns else "ticker"
+    stocks_in_file = int(combined[uniq_col].nunique())
     meta = get_market_metadata()
     if "years" not in meta:
         meta["years"] = {}
     meta["years"][year] = {
-        "status": "complete" if combined["symbol"].nunique() >= get_universe_count() * 0.99 else "partial",
-        "stocks_count": combined["symbol"].nunique(),
+        "status": "complete" if stocks_in_file >= get_universe_count() * 0.99 else "partial",
+        "stocks_count": stocks_in_file,
         "date_range": [start_d.isoformat(), end_d.isoformat()],
         "file_size_mb": round(size_mb, 1),
     }
     save_market_metadata(meta)
     if callable(on_progress):
-        _invoke_progress(on_progress, f"{year} 完成：{combined['symbol'].nunique()} 檔，{len(combined)} 筆，{size_mb:.1f} MB", False)
+        _invoke_progress(on_progress, f"{year} 完成：{stocks_in_file} 檔，{len(combined)} 筆，{size_mb:.1f} MB", False)
     return True
+
+
+def _concat_existing_and_rows(existing_df, rows):
+    if not rows and (existing_df is None or existing_df.empty):
+        return None
+    import pandas as pd
+    if not rows:
+        return existing_df
+    new_df = pd.concat(rows, ignore_index=True)
+    if existing_df is None or existing_df.empty:
+        return new_df
+    out = pd.concat([existing_df, new_df], ignore_index=True)
+    date_col = "Date" if "Date" in out.columns else ("date" if "date" in out.columns else None)
+    if date_col and "symbol" in out.columns:
+        out = out.drop_duplicates(subset=[date_col, "symbol"], keep="last")
+    return out
+
+
+def _write_partial(year: str, existing_df, rows, out_path, start_d, end_d, on_progress):
+    """每 N 檔寫入一次 partial parquet，中斷後下次可續跑。"""
+    combined = _concat_existing_and_rows(existing_df, rows)
+    if combined is None or combined.empty:
+        return
+    combined.to_parquet(out_path, index=False)
+    uniq_col = "symbol" if "symbol" in combined.columns else "ticker"
+    n_stocks = int(combined[uniq_col].nunique())
+    meta = get_market_metadata()
+    if "years" not in meta:
+        meta["years"] = {}
+    meta["years"][year] = {
+        "status": "partial",
+        "stocks_count": n_stocks,
+        "date_range": [start_d.isoformat(), end_d.isoformat()],
+        "file_size_mb": round(os.path.getsize(out_path) / (1024 * 1024), 1),
+    }
+    save_market_metadata(meta)
+    if callable(on_progress):
+        _invoke_progress(on_progress, f"  → 已寫入 partial（{n_stocks} 檔）", False)
 
 
 def _invoke_progress(on_progress, msg: str, same_line: bool):
@@ -494,7 +571,9 @@ def run_data_management_ui():
                 def _progress(msg, same_line=False, _yr=y, _i=idx, _n=n_years):
                     prefix = f"  [{_i}/{_n}] {_yr} "
                     if same_line:
-                        pad = " " * max(0, 95 - len(prefix) - len(msg))
+                        # 固定單行總長 100，避免換行後 \r 只清當行造成殘影
+                        total_len = 100
+                        pad = " " * max(0, total_len - len(prefix) - len(msg))
                         print(f"\r{prefix}{msg}{pad}", end="", flush=True)
                     else:
                         if msg:
