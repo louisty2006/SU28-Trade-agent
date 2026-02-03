@@ -430,43 +430,59 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
             _invoke_progress(on_progress, f"開始 {year}（共 {total} 檔，並行 {_max_workers}；可隨時 Ctrl+C，下次續跑）", False)
     rows = []
     failed_tickers = []
+    _wait_timeout_sec = 90  # 若 90 秒內無任一筆完成，列印「仍在取得數據」避免看起來卡住
+    _fetch_timeout_sec = 60  # 單一股票最多等 60 秒，避免卡死 worker
     try:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, TimeoutError as FuturesTimeoutError
 
         def _fetch_one(ticker: str):
             try:
-                df = get_daily_bars(ticker, start_d, end_d, min_bars=1, merge_sources=True)
+                with ThreadPoolExecutor(max_workers=1) as sub_exec:
+                    fut = sub_exec.submit(
+                        get_daily_bars, ticker, start_d, end_d, min_bars=1, merge_sources=True
+                    )
+                    df = fut.result(timeout=_fetch_timeout_sec)
                 if df is not None and not df.empty:
                     df = df.copy()
                     df["symbol"] = ticker
                     return (ticker, df)
-            except Exception:
+            except (FuturesTimeoutError, Exception):
                 pass
             return (ticker, None)
 
         with ThreadPoolExecutor(max_workers=_max_workers) as executor:
-            futures = {executor.submit(_fetch_one, t): t for t in tickers_to_fetch}
+            future_to_ticker = {executor.submit(_fetch_one, t): t for t in tickers_to_fetch}
+            pending = set(future_to_ticker.keys())
             try:
-                for future in as_completed(futures):
-                    ticker, df = future.result()
-                    if df is not None:
-                        rows.append(df)
-                        downloaded_so_far = have_count + len(rows)
-                        remaining = total - downloaded_so_far
-                        pct = downloaded_so_far / total if total else 0
-                        filled = min(_bar_width, int(_bar_width * pct))
-                        bar = "[" + "#" * filled + "-" * (_bar_width - filled) + "]"
-                        pct_str = f"{pct*100:.1f}%" if pct < 0.01 else f"{pct*100:.0f}%"
-                        line = f"{bar} {pct_str} 已下載 {downloaded_so_far} 餘 {remaining} 當前:{ticker}"
-                        if len(line) > _max_line:
-                            line = line[:_max_line - 3] + "..."
+                while pending:
+                    done, pending = wait(pending, timeout=_wait_timeout_sec, return_when=FIRST_COMPLETED)
+                    if not done:
                         if callable(on_progress):
-                            _invoke_progress(on_progress, line, True)
-                        # 前 50 檔每次成功都寫入，之後每 50 檔寫一次，確保中斷後一定可續跑
-                        if len(rows) <= 50 or len(rows) % _checkpoint_every == 0:
-                            _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress, parquet_engine)
-                    else:
-                        failed_tickers.append(ticker)
+                            _invoke_progress(on_progress, f"  仍在取得數據…（剩 {len(pending)} 檔，可 Ctrl+C 中斷）", False)
+                        continue
+                    for f in done:
+                        ticker = future_to_ticker[f]
+                        try:
+                            _, df = f.result()
+                        except Exception:
+                            df = None
+                        if df is not None:
+                            rows.append(df)
+                            downloaded_so_far = have_count + len(rows)
+                            remaining = total - downloaded_so_far
+                            pct = downloaded_so_far / total if total else 0
+                            filled = min(_bar_width, int(_bar_width * pct))
+                            bar = "[" + "#" * filled + "-" * (_bar_width - filled) + "]"
+                            pct_str = f"{pct*100:.1f}%" if pct < 0.01 else f"{pct*100:.0f}%"
+                            line = f"{bar} {pct_str} 已下載 {downloaded_so_far} 餘 {remaining} 當前:{ticker}"
+                            if len(line) > _max_line:
+                                line = line[:_max_line - 3] + "..."
+                            if callable(on_progress):
+                                _invoke_progress(on_progress, line, True)
+                            if len(rows) <= 50 or len(rows) % _checkpoint_every == 0:
+                                _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress, parquet_engine)
+                        else:
+                            failed_tickers.append(ticker)
             except KeyboardInterrupt:
                 if rows or (existing_df is not None and not existing_df.empty):
                     if callable(on_progress):
@@ -526,20 +542,58 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
     return True
 
 
+# 歷史 K 線寫入的標準欄位與順序，確保齊備清晰
+_KLINE_COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume", "symbol"]
+
+
+def _normalize_kline_columns(df):
+    """將 DataFrame 統一為標準欄位名稱與順序：Date, Open, High, Low, Close, Volume, symbol。"""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    renames = {}
+    if "date" in out.columns and "Date" not in out.columns:
+        renames["date"] = "Date"
+    for name in ["open", "high", "low", "close", "volume"]:
+        cap = name.capitalize()
+        if name in out.columns and cap not in out.columns:
+            renames[name] = cap
+    if renames:
+        out = out.rename(columns=renames)
+    if "ticker" in out.columns and "symbol" not in out.columns:
+        out["symbol"] = out["ticker"]
+    existing = [c for c in _KLINE_COLUMNS if c in out.columns]
+    if len(existing) >= 6:
+        return out[existing]
+    return out
+
+
+def _sort_kline_df(df):
+    """依 symbol、Date 排序，方便檢視與後續分析。"""
+    if df is None or df.empty or "symbol" not in df.columns:
+        return df
+    date_col = "Date" if "Date" in df.columns else ("date" if "date" in df.columns else None)
+    if not date_col:
+        return df
+    return df.sort_values(by=["symbol", date_col], ignore_index=True)
+
+
 def _concat_existing_and_rows(existing_df, rows):
     if not rows and (existing_df is None or existing_df.empty):
         return None
     import pandas as pd
     if not rows:
-        return existing_df
+        return _sort_kline_df(_normalize_kline_columns(existing_df))
     new_df = pd.concat(rows, ignore_index=True)
     if existing_df is None or existing_df.empty:
-        return new_df
-    out = pd.concat([existing_df, new_df], ignore_index=True)
+        out = new_df
+    else:
+        out = pd.concat([existing_df, new_df], ignore_index=True)
     date_col = "Date" if "Date" in out.columns else ("date" if "date" in out.columns else None)
     if date_col and "symbol" in out.columns:
         out = out.drop_duplicates(subset=[date_col, "symbol"], keep="last")
-    return out
+    out = _normalize_kline_columns(out)
+    return _sort_kline_df(out)
 
 
 def _write_partial(year: str, existing_df, rows, out_path, start_d, end_d, on_progress, engine: str = "pyarrow"):
