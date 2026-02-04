@@ -476,6 +476,16 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
                     if callable(on_progress):
                         _invoke_progress(on_progress, f"{year} 已完整（{len(have)} 檔），跳過", False)
                     return True
+                # 早年（2005–2009）許多標的當年尚未上市，達 30% 視為可跳過，優先完成近年
+                if int(year) <= 2009 and len(have) >= total * 0.30:
+                    if callable(on_progress):
+                        _invoke_progress(on_progress, f"{year} 已達 {len(have)} 檔（{100*len(have)/total:.0f}%），早年視為可跳過", False)
+                    return True
+                # 早年（2005–2009）許多標的當年尚未上市，達 30% 視為可跳過，優先完成近年
+                if int(year) <= 2009 and len(have) >= total * 0.30:
+                    if callable(on_progress):
+                        _invoke_progress(on_progress, f"{year} 已達 {len(have)} 檔（{100*len(have)/total:.0f}%），早年視為可跳過", False)
+                    return True
         except Exception as e:
             _debug_log({"tag": "resume_load_fail", "year": year, "path": os.path.abspath(out_path), "error": str(e)})
             existing_df = None
@@ -954,10 +964,10 @@ def run_data_management_ui():
             _print_kline_status_refresh()
             continue
         if choice == "B":
-            print("下載 2005-2025 共 21 年，耗時較長")
+            print("下載 2025→2005 共 21 年（先近年再早年），耗時較長")
             if input("確認？[y/N]: ").strip().lower() != "y":
                 continue
-            years_list = list(range(2005, 2026))
+            years_list = list(range(2025, 2004, -1))
             n_years = len(years_list)
             for idx, y in enumerate(years_list, 1):
                 def _progress(msg, same_line=False, _yr=y, _i=idx, _n=n_years):
