@@ -498,7 +498,8 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
     _yf_log.setLevel(logging.ERROR)
     _yf_log.disabled = True
     _bar_width = 20
-    _max_line = PROGRESS_LINE_WIDTH - 18
+    _current_suffix_len = 14  # 保留「 當前:XXXXXX」長度，避免截斷時看不到正在處理的股票
+    _max_line = PROGRESS_LINE_WIDTH - 18 - _current_suffix_len
     _checkpoint_every = 50
     _max_workers = 8
     _retry_delay_sec = 1.0
@@ -507,69 +508,126 @@ def repair_or_download_year(year: str, on_progress: Optional[callable] = None) -
             _invoke_progress(on_progress, f"續跑 {year}：已有 {have_count} 檔，待補 {len(tickers_to_fetch)} 檔（並行 {_max_workers}，可隨時 Ctrl+C，下次續跑）", False)
         else:
             _invoke_progress(on_progress, f"開始 {year}（共 {total} 檔，並行 {_max_workers}；可隨時 Ctrl+C，下次續跑）", False)
+        # 空一行再開始 \r 進度列，避免覆蓋「續跑／開始」那行
+        _invoke_progress(on_progress, "", False)
     rows = []
     failed_tickers = []
-    _wait_timeout_sec = 90  # 若 90 秒內無任一筆完成，列印「仍在取得數據」避免看起來卡住
-    _fetch_timeout_sec = 60  # 單一股票最多等 60 秒，避免卡死 worker
+    _wait_timeout_sec = 45  # 若 45 秒內無任一筆完成，列印「仍在取得數據」避免看起來卡住
+    _fetch_timeout_sec = 30  # 單一股票最多等 30 秒，避免卡死 worker
     try:
+        import threading
         from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, TimeoutError as FuturesTimeoutError
 
-        def _fetch_one(ticker: str):
-            try:
-                with ThreadPoolExecutor(max_workers=1) as sub_exec:
-                    fut = sub_exec.submit(
-                        get_daily_bars, ticker, start_d, end_d, min_bars=1, merge_sources=True
-                    )
-                    df = fut.result(timeout=_fetch_timeout_sec)
-                if df is not None and not df.empty:
-                    df = df.copy()
-                    df["symbol"] = ticker
-                    return (ticker, df)
-            except (FuturesTimeoutError, Exception):
-                pass
-            return (ticker, None)
+        _in_flight_lock = threading.Lock()
+        _in_flight_tickers = set()
 
-        with ThreadPoolExecutor(max_workers=_max_workers) as executor:
-            future_to_ticker = {executor.submit(_fetch_one, t): t for t in tickers_to_fetch}
-            pending = set(future_to_ticker.keys())
+        def _fetch_one(ticker: str):
+            with _in_flight_lock:
+                _in_flight_tickers.add(ticker)
             try:
-                while pending:
-                    done, pending = wait(pending, timeout=_wait_timeout_sec, return_when=FIRST_COMPLETED)
-                    if not done:
-                        if callable(on_progress):
-                            _invoke_progress(on_progress, f"  仍在取得數據…（剩 {len(pending)} 檔，可 Ctrl+C 中斷）", False)
-                        continue
-                    for f in done:
-                        ticker = future_to_ticker[f]
-                        try:
-                            _, df = f.result()
-                        except Exception:
-                            df = None
-                        if df is not None:
-                            rows.append(df)
-                            downloaded_so_far = have_count + len(rows)
-                            remaining = total - downloaded_so_far
-                            pct = downloaded_so_far / total if total else 0
-                            filled = min(_bar_width, int(_bar_width * pct))
-                            bar = "[" + "#" * filled + "-" * (_bar_width - filled) + "]"
-                            pct_str = f"{pct*100:.1f}%" if pct < 0.01 else f"{pct*100:.0f}%"
-                            line = f"{bar} {pct_str} 已下載 {downloaded_so_far} 餘 {remaining} 當前:{ticker}"
-                            if len(line) > _max_line:
-                                line = line[:_max_line - 3] + "..."
+                def _get_bars_with_socket_timeout():
+                    import socket
+                    socket.setdefaulttimeout(_fetch_timeout_sec)  # 在實際跑 get_daily_bars 的執行緒設 socket 逾時，避免 yfinance 無限卡住
+                    return get_daily_bars(ticker, start_d, end_d, min_bars=1, merge_sources=True)
+                try:
+                    with ThreadPoolExecutor(max_workers=1) as sub_exec:
+                        fut = sub_exec.submit(_get_bars_with_socket_timeout)
+                        df = fut.result(timeout=_fetch_timeout_sec + 5)  # 略大於 socket 逾時，留餘裕
+                    if df is not None and not df.empty:
+                        df = df.copy()
+                        df["symbol"] = ticker
+                        return (ticker, df)
+                except (FuturesTimeoutError, Exception):
+                    pass
+                return (ticker, None)
+            finally:
+                with _in_flight_lock:
+                    _in_flight_tickers.discard(ticker)
+
+        _heartbeat_stop = threading.Event()
+        _heartbeat_interval_sec = 30  # 每 30 秒顯示進度與正在處理的股票
+        _elapsed = [0]
+        _downloaded_so_far = [have_count]  # 主迴圈更新，心跳讀取：該年已完成隻數
+
+        def _heartbeat_thread():
+            while not _heartbeat_stop.wait(_heartbeat_interval_sec):
+                if _heartbeat_stop.is_set():
+                    break
+                _elapsed[0] += _heartbeat_interval_sec
+                if callable(on_progress):
+                    run_ok = len(rows)
+                    run_fail = len(failed_tickers)
+                    processed = have_count + run_ok + run_fail  # 本輪已處理數（含成功+失敗），數字會隨 worker 完成而增加
+                    done_count = _downloaded_so_far[0]  # 實際已成功寫入的隻數
+                    remain = total - done_count
+                    pct_val = (done_count / total * 100) if total else 0
+                    progress_str = f"已處理 {processed:,} 隻（成功 {done_count:,}，失敗 {run_fail}），餘 {remain:,} 隻，進度 {pct_val:.1f}%"
+                    run_str = ""
+                    with _in_flight_lock:
+                        current = sorted(_in_flight_tickers)
+                    if current:
+                        tickers_str = ", ".join(current[: 10]) + (" …" if len(current) > 10 else "")
+                        _invoke_progress(on_progress, f"  {progress_str}{run_str}｜正在處理: {tickers_str}", False)
+                    else:
+                        _invoke_progress(on_progress, f"  {progress_str}{run_str}｜… 下載中（已等待 {_elapsed[0]} 秒）", False)
+
+        _heartbeat = threading.Thread(target=_heartbeat_thread, daemon=True)
+        _heartbeat.start()
+        try:
+            with ThreadPoolExecutor(max_workers=_max_workers) as executor:
+                future_to_ticker = {executor.submit(_fetch_one, t): t for t in tickers_to_fetch}
+                pending = set(future_to_ticker.keys())
+                if callable(on_progress):
+                    _invoke_progress(on_progress, f"正在並行下載…（{len(pending)} 檔，每秒顯示正在處理的股票）", False)
+                try:
+                    while pending:
+                        done, pending = wait(pending, timeout=_wait_timeout_sec, return_when=FIRST_COMPLETED)
+                        if not done:
                             if callable(on_progress):
-                                _invoke_progress(on_progress, line, True)
-                            if len(rows) <= 50 or len(rows) % _checkpoint_every == 0:
-                                _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress, parquet_engine)
-                                # 寫入後即時印出該年一行狀態，數字隨 partial 更新
-                                _print_kline_status_one_line(year)
-                        else:
-                            failed_tickers.append(ticker)
-            except KeyboardInterrupt:
-                if rows or (existing_df is not None and not existing_df.empty):
-                    if callable(on_progress):
-                        _invoke_progress(on_progress, "  中斷前寫入進度…", False)
-                    _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress, parquet_engine)
-                raise
+                                _invoke_progress(on_progress, f"  仍在取得數據…（剩 {len(pending)} 檔，可 Ctrl+C 中斷）", False)
+                            continue
+                        for f in done:
+                            ticker = future_to_ticker[f]
+                            try:
+                                _, df = f.result()
+                            except Exception:
+                                df = None
+                            if df is not None:
+                                rows.append(df)
+                                downloaded_so_far = have_count + len(rows)
+                                _downloaded_so_far[0] = downloaded_so_far
+                                remaining = total - downloaded_so_far
+                                pct = downloaded_so_far / total if total else 0
+                                filled = min(_bar_width, int(_bar_width * pct))
+                                bar = "[" + "#" * filled + "-" * (_bar_width - filled) + "]"
+                                pct_str = f"{pct*100:.1f}%" if pct < 0.01 else f"{pct*100:.0f}%"
+                                current_part = (f" 當前:{ticker}")[: _current_suffix_len]
+                                mid = f"{bar} {pct_str} 已下載 {downloaded_so_far} 餘 {remaining}"
+                                if len(mid) > _max_line:
+                                    mid = mid[: _max_line - 3] + "..."
+                                line = mid + current_part
+                                if callable(on_progress):
+                                    _invoke_progress(on_progress, line, True)
+                                if len(rows) <= 50 or len(rows) % _checkpoint_every == 0:
+                                    _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress, parquet_engine)
+                                    # 寫入後即時印出該年一行狀態，數字隨 partial 更新
+                                    _print_kline_status_one_line(year)
+                            else:
+                                failed_tickers.append(ticker)
+                except KeyboardInterrupt:
+                    # 先停止心跳，避免「已存妥」後心跳再印一行造成誤解
+                    _heartbeat_stop.set()
+                    _heartbeat.join(timeout=1.0)
+                    if rows or (existing_df is not None and not existing_df.empty):
+                        if callable(on_progress):
+                            _invoke_progress(on_progress, "  中斷前寫入進度…", False)
+                        _write_partial(year, existing_df, rows, out_path, start_d, end_d, on_progress, parquet_engine)
+                        s = _get_one_year_status_from_disk(year)
+                        if s and callable(on_progress):
+                            _invoke_progress(on_progress, f"  已存妥：{year}.parquet 共 {s.stocks_count:,} 檔 {s.size_mb:.1f} MB，下次續跑會從此繼續。", False)
+                    raise
+        finally:
+            _heartbeat_stop.set()
         # 補下載：失敗的改為順序重試一次，間隔 _retry_delay_sec，避免第三方限流後立刻再打
         rows_before_retry = len(rows)
         if failed_tickers and callable(on_progress):
