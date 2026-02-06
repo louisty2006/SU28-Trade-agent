@@ -216,21 +216,36 @@ class MultiAgentAnalysis:
             final_recommendation=rec,
         )
 
-    def analyze_all(self, candidates: List, data: dict) -> dict:
+    def analyze_all(self, candidates: List, data: dict, on_ticker=None) -> dict:
         """
         批量分析。candidates 為 PatternCandidate 列表；data 含 market_data、fundamental_by_ticker、sentiment_by_ticker（可選）。
+        on_ticker(ticker, result, index, total) 可選，每完成一檔呼叫一次，供終端顯示進度與擇要。
         回傳 { "by_ticker": { ticker: MultiAgentResult }, "summary": "..." } 以兼容現有流程與決策摘要。
         """
+        cand_list = list(candidates or [])
+        total = len(cand_list)
         by_ticker: Dict[str, MultiAgentResult] = {}
         tickers_done = []
-        for c in candidates or []:
+        if total > 0:
+            print(f"[REISHI] [Multi-Agent] 開始分析 {total} 檔（每檔約 4 次 LLM），每 20 檔顯示擇要…", flush=True)
+        for idx, c in enumerate(cand_list):
             ticker = getattr(c, "ticker", None)
             if not ticker:
                 continue
             result = self.analyze(ticker, data)
             by_ticker[ticker] = result
             tickers_done.append(ticker)
+            i = len(tickers_done)
+            if callable(on_ticker):
+                try:
+                    on_ticker(ticker, result, i, total)
+                except Exception:
+                    pass
+            # 每 20 檔在終端印一則擇要，避免刷屏又讓用戶看到進度
+            if i % 20 == 0 or i == total:
+                rec_short = (result.final_recommendation or "")[:55].replace("\n", " ")
+                print(f"    [{i}/{total}] {ticker}: {result.consensus_action} — {rec_short}{'…' if len(result.final_recommendation or '') > 55 else ''}", flush=True)
         summary_parts = [f"{t}: {by_ticker[t].consensus_action} ({by_ticker[t].final_recommendation[:50]}...)" for t in tickers_done[:5]]
         summary = "Multi-Agent 分析完成。\n" + "\n".join(summary_parts) if summary_parts else "Multi-Agent 分析完成（無候選）。"
-        print(f"[REISHI] [Multi-Agent] 完成 候選數={len(by_ticker)}，前5檔共識={[f'{t}: {by_ticker[t].consensus_action}' for t in tickers_done[:5]]}")
+        print(f"[REISHI] [Multi-Agent] 完成 候選數={len(by_ticker)}，前5檔共識={[f'{t}: {by_ticker[t].consensus_action}' for t in tickers_done[:5]]}", flush=True)
         return {"by_ticker": by_ticker, "summary": summary}
