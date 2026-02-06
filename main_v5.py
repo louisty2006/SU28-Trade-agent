@@ -64,6 +64,7 @@ from core.final_auditor import FinalAuditor
 
 # Analysis modules
 from analysis.pattern_recognition import PatternRecognition
+from analysis.fundamental_analysis import FundamentalAnalyzer
 from analysis.sentiment_analysis import SentimentAnalyzer
 from analysis.multi_agent import MultiAgentAnalysis
 from analysis.knowledge_graph import KnowledgeGraph
@@ -87,7 +88,7 @@ class ReishiV5:
     
     def __init__(self, config_path: str = "config.yaml"):
         print("=" * 70)
-        print("🔮 REISHI 霊視 v5.0 MVP")
+        print("🔮 REISHI 霊視 v5.3")
         print("=" * 70)
         print("初始化系统...")
         
@@ -95,6 +96,7 @@ class ReishiV5:
         self.data_validator = DataValidator()
         self.anti_hallucination = AntiHallucination()
         self.pattern_recognition = PatternRecognition()
+        self.fundamental_analyzer = FundamentalAnalyzer()
         self.knowledge_graph = KnowledgeGraph()
         self.causal_reasoning = CausalReasoning(self.knowledge_graph)
         self.sentiment_analyzer = SentimentAnalyzer()
@@ -137,7 +139,7 @@ class ReishiV5:
         """
         from reporting.flow_logger import FlowLogger
         print("\n" + "=" * 70)
-        print("🔮 REISHI 霊視 v5.0 - 每日分析")
+        print("🔮 REISHI 霊視 v5.3 - 每日分析")
         print("=" * 70)
         flow_logger = FlowLogger(flush_each=True)
         try:
@@ -167,50 +169,85 @@ class ReishiV5:
                 memory_desc = "已載入"
             flow_logger.log_input_layer(your_state, market_data_desc, news_desc, memory_desc, as_of_date="", mode="每日分析")
             # 1. 获取并验证数据 — 第一層防護：數據驗證（先標明步驟與數據源，再拉取）
-            print("\n[1/8] 数据获取与验证...")
+            print("\n[1/9] 数据获取与验证...")
+            print("[REISHI] [步驟1] 判斷基準：Yahoo/多數據源 K 線；僅美股/港股交易所；數據源依 config。")
             flow_logger.log_layer1_start("Yahoo (DataFetcher) / yfinance（依環境）")
             market_data, data_source = self._fetch_and_validate_data(on_ticker=lambda t, i, n: flow_logger.log_layer1_fetch(t, i, n))
             tickers = list(market_data.keys()) or tickers_to_fetch
             flow_logger.log_layer1_result(len(market_data), tickers, data_source=data_source)
+            print(f"[REISHI] 擇要：有效 ticker 數={len(market_data)}，來源={data_source}，前5檔={tickers[:5]}")
             if not market_data:
                 print("   ⚠ 無市場數據，分析將僅有架構輸出")
+            # 基本面分析（數據源：DataFetcher / yfinance 財報與估值）
+            print("\n[2/9] 基本面分析...")
+            print("[REISHI] [步驟2] 判斷基準：get_yahoo_info / get_yahoo_financials_as_of；PE/PB/ROE/營收與盈利成長/利潤率。")
+            fundamental_by_ticker = self.fundamental_analyzer.analyze_batch(
+                tickers, on_ticker=lambda t, i, n: flow_logger.log_layer1_fetch(t, i, n) if flow_logger else None
+            )
+            _n_f = len(fundamental_by_ticker)
+            _preview_f = [f"{t}: {getattr(fundamental_by_ticker[t], 'summary_text', '')[:40]}…" for t in list(fundamental_by_ticker.keys())[:3]]
+            print(f"[REISHI] 擇要：成功基本面數={_n_f}，前3檔擇要={_preview_f}")
             # 五大 AI 方向分析層
             flow_logger.log_ai_layer_start()
-            # 2. 图表型态识别（數據源：第一層驗證後的 K 線）
-            print("\n[2/8] 图表型态识别...")
+            # 3. 图表型态识别（數據源：第一層驗證後的 K 線）
+            print("\n[3/9] 图表型态识别...")
+            print("[REISHI] [步驟3] 判斷基準：收盤≥20日高 0.98 視為突破；成交量/均線未檢核。")
             flow_logger.log_ai_2_start(len(tickers), data_sources="第一層驗證後的 K 線（步驟 1 的 Yahoo/DataFetcher）")
             pattern_analysis = self.pattern_recognition.scan_all(tickers, market_data, on_ticker=lambda t, i, n: flow_logger.log_ai_2_fetch(t, i, n))
             flow_logger.log_ai_2_result(len(pattern_analysis), [getattr(c, "ticker", "") for c in pattern_analysis] if pattern_analysis else None)
-            # 3. 因果推理（數據源：即時新聞 Finnhub、持倉本地）
-            print("\n[3/8] 因果推理...")
+            _pt = [getattr(c, "ticker", "?") for c in (pattern_analysis or [])[:5]]
+            print(f"[REISHI] 擇要：圖表候選數={len(pattern_analysis or [])}，前5檔={_pt}")
+            # 4. 因果推理（數據源：即時新聞 Finnhub、持倉本地）
+            print("\n[4/9] 因果推理...")
+            print("[REISHI] [步驟4] 判斷基準：Finnhub 新聞 + 持倉；LLM 因果鏈（四角）。")
             flow_logger.log_ai_3_start(data_sources="即時新聞（Finnhub）、持倉（本地）；LLM 因果鏈（四角）")
             causal_analysis = self.causal_reasoning.analyze_all(news=all_news_for_causal, portfolio=self.portfolio.positions)
             flow_logger.log_ai_3_result()
-            # 4. 情绪分析（數據源：即時新聞 Finnhub、標的列表）
-            print("\n[4/8] 情绪分析...")
+            print("[REISHI] 擇要：因果推理完成（新聞筆數、持倉數已納入）。")
+            # 5. 情绪分析（數據源：即時新聞 Finnhub、標的列表）
+            print("\n[5/9] 情绪分析...")
+            print("[REISHI] [步驟5] 判斷基準：新聞內容→LLM；輸出 score(-1~1)/key_factors/risks；無新聞或失敗→中性。")
             flow_logger.log_ai_4_start(len(tickers), data_sources="即時新聞（Finnhub）、標的列表；LLM 情緒分析（四角）")
             sentiment_analysis = self.sentiment_analyzer.analyze_batch(tickers, on_ticker=lambda t, i, n: flow_logger.log_ai_4_fetch(t, i, n), news_by_ticker=news_by_ticker_for_sentiment)
             flow_logger.log_ai_4_result()
-            # 5. Multi-Agent 分析（數據源：圖表候選 + 市場數據；LLM 四角）
-            print("\n[5/8] Multi-Agent 协作分析...")
-            flow_logger.log_ai_5_start(len(pattern_analysis), data_sources="圖表候選（步驟 2）、市場數據（步驟 1）；LLM 四角（Scitely/Cohere/Mistral/OpenRouter）")
-            multi_agent_analysis = self.multi_agent.analyze_all(candidates=pattern_analysis, data=market_data)
+            _s_preview = [(t, getattr(sentiment_analysis.get(t), "score", 0.5)) for t in list(sentiment_analysis.keys())[:5]]
+            print(f"[REISHI] 擇要：情緒分析檔數={len(sentiment_analysis)}，前5檔 score={_s_preview}")
+            # 6. Multi-Agent 分析（數據源：圖表候選 + 市場數據；LLM 四角）
+            print("\n[6/9] Multi-Agent 协作分析...")
+            print("[REISHI] [步驟6] 判斷基準：三角色(Fundamental/Sentiment/Valuation)→單輪共識；輸出 consensus_action/disagreements/final_recommendation。")
+            flow_logger.log_ai_5_start(len(pattern_analysis), data_sources="圖表候選（步驟 3）、市場數據（步驟 1）；LLM 四角（Scitely/Cohere/Mistral/OpenRouter）")
+            multi_agent_analysis = self.multi_agent.analyze_all(
+                candidates=pattern_analysis,
+                data={
+                    "market_data": market_data,
+                    "fundamental_by_ticker": fundamental_by_ticker,
+                    "sentiment_by_ticker": sentiment_analysis,
+                },
+            )
             flow_logger.log_ai_5_result()
-            # 6. 霊視记忆参考（數據源：霊視記憶 DB、圖表候選）
-            print("\n[6/8] 霊視记忆参考...")
-            flow_logger.log_ai_6_start(data_sources="霊視記憶 DB（本地）、圖表候選（步驟 2）；LLM 摘要/洞察（四角）")
+            _ma = multi_agent_analysis or {}
+            _by_t = _ma.get("by_ticker") or {}
+            _ma_preview = [f"{t}: {getattr(_by_t[t], 'consensus_action', '?')}" for t in list(_by_t.keys())[:5]]
+            print(f"[REISHI] 擇要：Multi-Agent 候選數={len(_by_t)}，前5檔共識={_ma_preview}")
+            # 7. 霊視记忆参考（數據源：霊視記憶 DB、圖表候選）
+            print("\n[7/9] 霊視记忆参考...")
+            print("[REISHI] [步驟7] 判斷基準：霊視記憶 DB + 圖表候選；LLM 摘要/洞察（四角）。")
+            flow_logger.log_ai_6_start(data_sources="霊視記憶 DB（本地）、圖表候選（步驟 3）；LLM 摘要/洞察（四角）")
             memory_insights = self.memory.get_insights_for_candidates(pattern_analysis)
             n_insights = len(memory_insights.get("insights", [])) if isinstance(memory_insights, dict) else 0
             flow_logger.log_ai_6_result(n_insights)
-            # 7. 决策引擎 — 第二層防護：LLM 防幻覺（數據源：防幻覺模組 + 步驟 1～6 結果）
-            print("\n[7/8] 决策引擎...")
-            flow_logger.log_layer2_start(data_sources="防幻覺模組（Scitely/Cohere/Mistral/OpenRouter）、步驟 1～6 分析結果")
+            print(f"[REISHI] 擇要：霊視記憶洞察數={n_insights}")
+            # 8. 决策引擎 — 第二層防護：LLM 防幻覺（數據源：防幻覺模組 + 步驟 1～7 結果）
+            print("\n[8/9] 决策引擎...")
+            print("[REISHI] [步驟8] 判斷基準：三大原則(賺最多/賺最快/風險最少)+ AllAnalyses 摘要→防幻覺 LLM→解析 actions。")
+            flow_logger.log_layer2_start(data_sources="防幻覺模組（Scitely/Cohere/Mistral/OpenRouter）、步驟 1～7 分析結果")
             all_analyses = AllAnalyses(
                 pattern=pattern_analysis,
                 causal=causal_analysis,
                 sentiment=sentiment_analysis,
                 multi_agent=multi_agent_analysis,
-                memory=memory_insights
+                memory=memory_insights,
+                fundamental=fundamental_by_ticker,
             )
             decision = self.decision_engine.decide(
                 state=self.portfolio,
@@ -220,12 +257,15 @@ class ReishiV5:
             acts = getattr(decision, "actions", []) or []
             summary = ", ".join([f"{getattr(a, 'action', '')} {getattr(a, 'ticker', '')}" for a in acts[:3]]) if acts else "無操作"
             flow_logger.log_layer2_result(len(acts), summary)
-            # 8. 验证 + 审计
-            print("\n[8/8] 最终验证与审计...")
+            print(f"[REISHI] 擇要：決策解析 actions 數={len(acts)}，前3筆={summary}")
+            # 9. 验证 + 审计
+            print("\n[9/9] 最终验证与审计...")
+            print("[REISHI] [步驟9] 判斷基準：output_validator 邏輯/數字檢查；final_auditor 審計（只檢查不判斷）。")
             flow_logger.log_validation_start()
             validation = self.output_validator.validate_decision(decision, all_analyses)
             flow_logger.log_audit_start()
             audit = self.final_auditor.audit(decision, all_analyses)
+            print(f"[REISHI] 擇要：驗證 passed={getattr(validation, 'passed', None)}；審計完成。")
             # 生成报告
             print("\n生成报告...")
             report = self.report_generator.generate(decision, all_analyses, audit)
@@ -359,6 +399,8 @@ class ReishiV5:
         if not silent:
             print(f"   [回測日] 數據截至 {end_str}")
         # 細項 1：取數 — 第一層防護：數據驗證（先標明步驟與數據源，再拉取）
+        if not silent:
+            print("[REISHI] [回測步驟1] 判斷基準：K 線僅到 as_of_date；Yahoo/多數據源。")
         _prog(1, "取數", 0)
         _activity(1, "開始從數據源拉取歷史 K 線…")
         # #region agent log
@@ -378,6 +420,8 @@ class ReishiV5:
         else:
             market_data, data_source = self._fetch_and_validate_data(end_date=as_of_date, start_date=start_d, cap=stock_count, silent=silent, on_ticker=_on_ticker_wrap, on_fetch_progress=_step)
         _step(f"步驟1 數據獲取 完成 有效 {len(market_data)} 檔 來源 {data_source}")
+        if not silent:
+            print(f"[REISHI] 擇要：有效 ticker 數={len(market_data)}，來源={data_source}，前5={list(market_data.keys())[:5]}")
         # #region agent log
         try:
             import json
@@ -401,10 +445,25 @@ class ReishiV5:
         if report_dir:
             write_step_report(report_dir, 1, flow_steps[0], short_names[0], data_source=data_source)
         tickers = list(market_data.keys()) or tickers_to_fetch
+        # 基本面分析（回測：僅用 as_of_date 及之前數據）
+        if not silent:
+            print("[REISHI] [回測步驟1b] 判斷基準：get_yahoo_financials_as_of(as_of_date)；不取未來。")
+        _step("步驟1b 基本面分析 開始")
+        fundamental_by_ticker = self.fundamental_analyzer.analyze_batch(
+            tickers,
+            as_of_date=end_str,
+            backtest_start=start_str,
+            on_ticker=lambda t, i, n: _activity(1, f"基本面 {t} ({i}/{n})") if callable(on_step_activity) else None,
+        )
+        _step(f"步驟1b 基本面分析 完成 有效 {len(fundamental_by_ticker)} 檔")
+        if not silent:
+            print(f"[REISHI] 擇要：基本面有效數={len(fundamental_by_ticker)}")
         # 五大 AI 方向分析層
         if flow_logger:
             flow_logger.log_ai_layer_start()
         # 細項 2：圖表型態識別（數據源：第一層驗證後的 K 線）
+        if not silent:
+            print("[REISHI] [回測步驟2] 判斷基準：收盤≥20日高 0.98 為突破。")
         _prog(2, "圖形掃描", 0)
         _step(f"步驟2 圖表型態識別 開始 {len(tickers)} 檔")
         _activity(2, f"開始掃描 {len(tickers)} 檔圖表型態（突破、VCP 等）…")
@@ -439,11 +498,15 @@ class ReishiV5:
         if flow_logger:
             flow_logger.log_ai_2_result(len(pattern_analysis), [getattr(c, "ticker", "") for c in pattern_analysis] if pattern_analysis else None)
         _step(f"步驟2 圖表型態識別 完成 候選 {len(pattern_analysis)} 檔")
+        if not silent:
+            print(f"[REISHI] 擇要：圖表候選數={len(pattern_analysis)}，前5={[getattr(c,'ticker','') for c in (pattern_analysis or [])[:5]]}")
         _activity(2, f"圖形掃描完成，候選數 {len(pattern_analysis)}")
         _prog(2, "圖形掃描", 100)
         if report_dir:
             write_step_report(report_dir, 2, flow_steps[1], short_names[1])
         # 細項 3：因果推理（數據源：Finnhub 新聞、持倉）
+        if not silent:
+            print("[REISHI] [回測步驟3] 判斷基準：新聞+持倉→LLM 因果鏈。")
         _prog(3, "因果分析", 0)
         _step("步驟3 因果推理 開始（LLM 因果鏈）")
         _activity(3, "因果推理：分析新聞影響與持倉風險…")
@@ -466,11 +529,15 @@ class ReishiV5:
                         causal_lines.append((str(chain))[:66])
             flow_logger.log_ai_3_result(causal_lines if causal_lines else None)
         _step("步驟3 因果推理 完成")
+        if not silent:
+            print("[REISHI] 擇要：因果推理完成。")
         _activity(3, "因果分析完成")
         _prog(3, "因果分析", 100)
         if report_dir:
             write_step_report(report_dir, 3, flow_steps[2], short_names[2])
         # 細項 4：情緒分析（數據源：Finnhub 新聞、標的）
+        if not silent:
+            print("[REISHI] [回測步驟4] 判斷基準：新聞→LLM 情緒；無新聞/失敗→中性。")
         _prog(4, "情緒分析", 0)
         _step(f"步驟4 情緒分析 開始 {len(tickers)} 檔")
         _activity(4, f"開始對 {len(tickers)} 檔做情緒分析…")
@@ -497,17 +564,28 @@ class ReishiV5:
                         sentiment_lines.append(part[:66])
             flow_logger.log_ai_4_result(sentiment_lines if sentiment_lines else None)
         _step("步驟4 情緒分析 完成")
+        if not silent:
+            print(f"[REISHI] 擇要：情緒分析檔數={len(sentiment_analysis)}")
         _activity(4, "情緒分析完成")
         _prog(4, "情緒分析", 100)
         if report_dir:
             write_step_report(report_dir, 4, flow_steps[3], short_names[3])
         # 細項 5：Multi-Agent 協作分析（數據源：圖表候選 + 市場數據；LLM 四角）
+        if not silent:
+            print("[REISHI] [回測步驟5] 判斷基準：三角色+單輪共識→consensus_action/disagreements。")
         _prog(5, "多智能體", 0)
         _step(f"步驟5 Multi-Agent 開始 候選 {len(pattern_analysis)} 檔（LLM 四角）")
         _activity(5, "多智能體：彙總候選與市場數據、產出共識…")
         if flow_logger:
             flow_logger.log_ai_5_start(len(pattern_analysis), data_sources="圖表候選（步驟 2）、市場數據（步驟 1）；LLM 四角（Scitely/Cohere/Mistral/OpenRouter）")
-        multi_agent_analysis = self.multi_agent.analyze_all(candidates=pattern_analysis, data=market_data)
+        multi_agent_analysis = self.multi_agent.analyze_all(
+            candidates=pattern_analysis,
+            data={
+                "market_data": market_data,
+                "fundamental_by_ticker": fundamental_by_ticker,
+                "sentiment_by_ticker": sentiment_analysis,
+            },
+        )
         if flow_logger:
             multi_lines = []
             if isinstance(multi_agent_analysis, dict):
@@ -520,11 +598,16 @@ class ReishiV5:
                         multi_lines.append(f"  {k}: {str(v)[:60]}")
             flow_logger.log_ai_5_result(multi_lines if multi_lines else None)
         _step("步驟5 Multi-Agent 完成")
+        if not silent:
+            _by = (multi_agent_analysis or {}).get("by_ticker") or {}
+            print(f"[REISHI] 擇要：Multi-Agent 候選數={len(_by)}")
         _activity(5, "多智能體分析完成")
         _prog(5, "多智能體", 100)
         if report_dir:
             write_step_report(report_dir, 5, flow_steps[4], short_names[4])
         # 細項 6：霊視記憶參考（數據源：霊視記憶 DB、圖表候選）
+        if not silent:
+            print("[REISHI] [回測步驟6] 判斷基準：霊視記憶 DB + 候選→LLM 洞察。")
         _prog(6, "記憶洞察", 0)
         _step("步驟6 霊視記憶 開始（LLM 摘要/洞察）")
         _activity(6, "霊視記憶：查詢歷史案例、提取洞察…")
@@ -542,16 +625,21 @@ class ReishiV5:
                         insight_preview.append(str(ins)[:66])
             flow_logger.log_ai_6_result(n_insights, insight_preview if insight_preview else None)
         _step(f"步驟6 霊視記憶 完成 {n_insights} 條洞察")
+        if not silent:
+            print(f"[REISHI] 擇要：洞察數={n_insights}")
         _activity(6, "記憶洞察完成")
         _prog(6, "記憶洞察", 100)
         if report_dir:
             write_step_report(report_dir, 6, flow_steps[5], short_names[5])
+        if not silent:
+            print("[REISHI] [回測步驟7] 判斷基準：AllAnalyses→防幻覺 LLM→解析 actions。")
         all_analyses = AllAnalyses(
             pattern=pattern_analysis,
             causal=causal_analysis,
             sentiment=sentiment_analysis,
             multi_agent=multi_agent_analysis,
             memory=memory_insights,
+            fundamental=fundamental_by_ticker,
         )
         # 細項 7：決策引擎 — 第二層防護：LLM 防幻覺（數據源：防幻覺模組 + 步驟 1～6）
         _prog(7, "決策引擎（LLM 決策中…）", 0)
@@ -584,8 +672,8 @@ class ReishiV5:
             flow_logger.log_flow_end()
         return decision, all_analyses
     
-    def _get_scan_tickers(self, cap: int = 20):
-        """取得要掃描的股票列表。cap 為數量上限（預設 20）。"""
+    def _get_scan_tickers(self, cap: int = 9000):
+        """取得要掃描的股票列表。cap 為數量上限（預設 9000，接近全美股）。"""
         # #region agent log
         try:
             import json, time
@@ -596,8 +684,36 @@ class ReishiV5:
         # #endregion
         import yaml
         tickers = []
-        # 優先從 us_universe.csv 取美股
-        us_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "us_universe.csv")
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        # 優先從完整股票池取（約 9000+ 檔）
+        complete_paths = [
+            os.path.join(base_dir, "data", "COMPLETE_ALL_STOCKS_FINAL.csv"),
+            os.path.join(base_dir, "COMPLETE_ALL_STOCKS_FINAL.csv"),
+        ]
+        for csv_path in complete_paths:
+            if os.path.isfile(csv_path):
+                try:
+                    import csv
+                    with open(csv_path, "r", encoding="utf-8-sig") as f:
+                        reader = csv.DictReader(f)
+                        col = "Symbol" if (reader.fieldnames and "Symbol" in reader.fieldnames) else "symbol"
+                        _seen = set()
+                        for row in reader:
+                            sym = (row.get(col) or row.get("Symbol") or row.get("symbol") or "").strip()
+                            if sym and sym.upper() not in _seen:
+                                _seen.add(sym.upper())
+                                tickers.append(sym)
+                                if len(tickers) >= cap:
+                                    break
+                        if len(tickers) >= cap:
+                            break
+                    if tickers:
+                        return tickers[:cap]
+                except Exception:
+                    tickers = []
+                    break
+        # 若無完整池或讀取失敗，從 us_universe.csv 取美股
+        us_path = os.path.join(base_dir, "data", "us_universe.csv")
         if os.path.isfile(us_path):
             try:
                 import csv
@@ -666,7 +782,7 @@ class ReishiV5:
         # #endregion
         return tickers[:cap]
 
-    def _fetch_and_validate_data(self, end_date=None, start_date=None, cap: int = 20, silent: bool = False, on_ticker=None, on_fetch_progress=None):
+    def _fetch_and_validate_data(self, end_date=None, start_date=None, cap: int = 9000, silent: bool = False, on_ticker=None, on_fetch_progress=None):
         """获取并验证市场数据。on_fetch_progress(msg) 可選，並行取得時每 N 筆回報一次（同時會 print）。"""
         import logging
         _yf_log = logging.getLogger("yfinance")
@@ -679,7 +795,7 @@ class ReishiV5:
             _yf_log.disabled = False
             _yf_log.setLevel(_yf_prev_level)
 
-    def _fetch_and_validate_data_impl(self, end_date=None, start_date=None, cap: int = 20, silent: bool = False, on_ticker=None, on_fetch_progress=None):
+    def _fetch_and_validate_data_impl(self, end_date=None, start_date=None, cap: int = 9000, silent: bool = False, on_ticker=None, on_fetch_progress=None):
         # #region agent log
         try:
             import json, time
@@ -920,7 +1036,7 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, stock_count: int 
     else:
         est_str = f"約 {est_min:.0f} 分鐘"
     print("\n" + "=" * 70)
-    print(f"🔗 REISHI v5.2 回测（逐日 v5.0 流程）— 每日 {stock_count} 檔" + (" [本地數據]" if use_local_data else ""))
+    print(f"🔗 REISHI v5.3 回测（逐日 v5.0 流程）— 每日 {stock_count} 檔" + (" [本地數據]" if use_local_data else ""))
     print("=" * 70)
     print(f"📅 期間: {start_date} → {end_date}，共 {n_days} 個交易日")
     print(f"💰 初始資金: {config.initial_cash:,.0f} HKD")
@@ -1135,7 +1251,7 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, stock_count: int 
 
 def main():
     """主程序入口"""
-    parser = argparse.ArgumentParser(description='REISHI 霊視 v5.0 MVP')
+    parser = argparse.ArgumentParser(description='REISHI 霊視 v5.3')
     parser.add_argument('--daily', action='store_true', help='运行每日分析')
     parser.add_argument('--monitor', action='store_true', help='启动即时监控')
     parser.add_argument('--stats', action='store_true', help='显示统计信息')
@@ -1412,22 +1528,21 @@ def main():
 # v4.3 風格：美學 banner、run 目錄、tee log（與 main.py 一致）
 # ---------------------------------------------------------------------------
 BANNER_V5 = """
-═══════════════════════════════════════════════════════════════════════
-                                                                       
-                     R  E  I  S  H  I                      
-                   ━━━━━━━━━━━━━━━━                       
-                 ━━━━━━━━━━━━━━━━━━━━                     
-               ━━━━━━━━━━━━━━━━━━━━━━━━                   
-                                                                       
-                      霊      視                          
-                                                                       
-             ░░░░░░░░░⚡░░░░░░░░░                       
-           ░░░░░░░░░░░░░░░░░░░░░░░░                     
-         ░░░░░░░░░░░░░░░░░░░░░░░░░░░░                   
-                                                                       
-                      v5.2
-                                                                       
-═══════════════════════════════════════════════════════════════════════
+╔═══════════════════════════════════════════════════════════════════════╗
+║                                                                       ║
+║    ██████╗ ███████╗██╗███████╗██╗  ██╗██╗    ██╗██╗  ██╗███████╗   ║
+║    ██╔══██╗██╔════╝██║██╔════╝██║  ██║██║    ██║██║  ██║██╔════╝   ║
+║    ██████╔╝█████╗  ██║███████╗███████║██║ █╗ ██║███████║█████╗      ║
+║    ██╔══██╗██╔══╝  ██║╚════██║██╔══██║██║███╗██║██╔══██║██╔══╝      ║
+║    ██║  ██║██║     ██║███████║██║  ██║╚███╔███╔╝██║  ██║██║         ║
+║    ╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝         ║
+║                                                                       ║
+║                       霊  視  ·  REISHI                               ║
+║              ───  AI 市場洞察 · 五層防護 · 多智能體  ───              ║
+║                                                                       ║
+║                           v5.3                                        ║
+║                                                                       ║
+╚═══════════════════════════════════════════════════════════════════════╝
 """
 
 

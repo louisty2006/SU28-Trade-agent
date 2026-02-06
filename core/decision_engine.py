@@ -79,16 +79,20 @@ class AllAnalyses:
     sentiment: Any  # SentimentAnalysis
     multi_agent: Any  # MultiAgentAnalysis
     memory: Any  # MemoryInsights
-    
+    fundamental: Any = None  # Dict[str, FundamentalResult] 基本面分析（可選）
+
     def to_dict(self) -> Dict:
         """转换为字典"""
-        return {
+        d = {
             "pattern": str(self.pattern) if self.pattern else None,
             "causal": str(self.causal) if self.causal else None,
             "sentiment": str(self.sentiment) if self.sentiment else None,
             "multi_agent": str(self.multi_agent) if self.multi_agent else None,
             "memory": str(self.memory) if self.memory else None
         }
+        if self.fundamental is not None:
+            d["fundamental"] = str(self.fundamental)
+        return d
     
     def summary(self) -> str:
         """简要摘要"""
@@ -127,11 +131,39 @@ class AllAnalyses:
                     lines.append(line)
                 pattern_summary = "\n".join(lines)
         
+        fundamental_summary = '無'
+        if self.fundamental and isinstance(self.fundamental, dict):
+            lines_f = []
+            for t, r in list(self.fundamental.items())[:5]:
+                s = getattr(r, 'summary_text', None) or str(r)[:80]
+                lines_f.append(f"  • {t}: {s}")
+            fundamental_summary = "\n".join(lines_f) if lines_f else '無'
+        elif self.fundamental:
+            fundamental_summary = str(self.fundamental)[:500]
+
+        multi_agent_summary = '無'
+        if self.multi_agent and isinstance(self.multi_agent, dict):
+            by_ticker = self.multi_agent.get("by_ticker") or {}
+            summary_str = self.multi_agent.get("summary")
+            if by_ticker:
+                lines_m = []
+                for t, res in list(by_ticker.items())[:5]:
+                    action = getattr(res, 'consensus_action', 'HOLD')
+                    rec = getattr(res, 'final_recommendation', '')[:60]
+                    dis = getattr(res, 'disagreements', []) or []
+                    lines_m.append(f"  • {t}: {action} — {rec}" + (f" 分歧: {dis[:2]}" if dis else ""))
+                multi_agent_summary = "\n".join(lines_m)
+            elif summary_str:
+                multi_agent_summary = summary_str[:500]
+        elif self.multi_agent and hasattr(self.multi_agent, 'summary'):
+            multi_agent_summary = self.multi_agent.summary() or '無'
+
         return f"""
 圖表型態: {pattern_summary}
+基本面: {fundamental_summary}
 因果推理: {getattr(self.causal, 'summary', lambda: '無')() if self.causal else '無'}
 情緒分析: {getattr(self.sentiment, 'summary', lambda: '無')() if self.sentiment else '無'}
-Multi-Agent: {getattr(self.multi_agent, 'summary', lambda: '無')() if self.multi_agent else '無'}
+Multi-Agent: {multi_agent_summary}
 霊視記憶: {getattr(self.memory, 'summary', lambda: '無')() if self.memory else '無'}
 """
 
@@ -227,6 +259,7 @@ class DecisionEngine:
         """
         # 1. 準備 prompt
         analyses_summary = analyses.summary()
+        print(f"[REISHI] [決策引擎] 送給 LLM 的摘要長度={len(analyses_summary)} 字，預覽 300 字：{analyses_summary[:300]}…")
         prompt = self.DECISION_PROMPT.format(
             cash=state.cash,
             positions=state.positions_summary(),
@@ -279,6 +312,9 @@ class DecisionEngine:
             pass
         # #endregion
         decision = self._build_decision(decision_data)
+        acts = getattr(decision, "actions", []) or []
+        act_preview = [f"{getattr(a, 'action', '')} {getattr(a, 'ticker', '')}" for a in acts[:3]]
+        print(f"[REISHI] [決策引擎] 解析完成 actions 數={len(acts)}，前3筆={act_preview}")
         
         # 若為 LLM 無回應／未配置之保守決策，明確提示
         assessment = (decision.overall_assessment or "").strip()
