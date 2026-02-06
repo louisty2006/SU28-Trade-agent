@@ -143,12 +143,22 @@ class ReishiV5:
         print("=" * 70)
         flow_logger = FlowLogger(flush_each=True)
         try:
+            print("取得掃描名單…", flush=True)
             tickers_to_fetch = self._get_scan_tickers()
-            # 即時新聞：Finnhub 公司新聞（輸入層用）
+            print(f"  掃描名單：共 {len(tickers_to_fetch)} 檔", flush=True)
+            # 即時新聞：Finnhub 公司新聞（輸入層用）；僅對前 N 檔請求，避免 9000 檔導致長時間/卡住
+            NEWS_CAP = 150
+            tickers_for_news = tickers_to_fetch[:NEWS_CAP]
             from utils.news_fetcher import fetch_news_for_tickers, to_news_objects
             to_date = datetime.now().strftime("%Y-%m-%d")
             from_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-            all_news_raw, news_by_ticker_raw = fetch_news_for_tickers(tickers_to_fetch, from_date, to_date)
+            print(f"正在取得新聞（Finnhub，前 {len(tickers_for_news)} 檔）…", flush=True)
+            all_news_raw, news_by_ticker_raw = fetch_news_for_tickers(tickers_for_news, from_date, to_date)
+            # 其餘 ticker 補空列表，供後續 sentiment 使用
+            for t in tickers_to_fetch:
+                if t not in news_by_ticker_raw:
+                    news_by_ticker_raw[t] = []
+            print(f"  新聞取得完成（共 {len(all_news_raw)} 筆）", flush=True)
             all_news_for_causal = to_news_objects(all_news_raw)
             news_by_ticker_for_sentiment = {t: to_news_objects(news_by_ticker_raw.get(t, [])) for t in tickers_to_fetch}
             if all_news_raw:
@@ -818,6 +828,9 @@ class ReishiV5:
             pass
         # #endregion
         n_tickers = len(tickers)
+        if not silent and n_tickers > 100:
+            _progress_every = max(50, min(500, n_tickers // 10))
+            print(f"    開始取得 {n_tickers} 檔 K 線（每 {_progress_every} 檔顯示進度）…", flush=True)
         _max_workers = min(16, max(4, n_tickers))
         try:
             from utils.data_fetcher import DataFetcher
@@ -872,12 +885,12 @@ class ReishiV5:
                         pass
                     _first_done = True
                 if _err is not None:
-                    if not silent:
+                    if not silent and n_tickers <= 100:
                         print(f"   ⚠ {ticker}: {_err}")
                     _df = None
                 if _df is not None and not _df.empty and len(_df) >= 20:
                     market_data[ticker] = _df
-                    if not silent:
+                    if not silent and n_tickers <= 100:
                         print(f"   ✓ {ticker}: {len(_df)} 筆")
                 else:
                     # 第一來源不足時，用多數據源補拿（Stooq/FMP 等），確保拿到準確數據
@@ -891,12 +904,12 @@ class ReishiV5:
                                 _df2.index = _pd.to_datetime(_df2.index)
                                 market_data[ticker] = _df2
                                 _used_multi_fallback = True
-                                if not silent:
+                                if not silent and n_tickers <= 100:
                                     print(f"   ✓ {ticker}: {len(_df2)} 筆（多數據源）")
                                 continue
                         except Exception:
                             pass
-                    if not silent:
+                    if not silent and n_tickers <= 100:
                         print(f"   ⚠ {ticker}: 資料不足，跳過")
             if _used_multi_fallback:
                 data_source = "Yahoo+MultiSource"
@@ -951,12 +964,12 @@ class ReishiV5:
                     on_ticker(ticker, idx + 1, n_tickers)
                 _df, _err = _results.get(ticker, (None, None))
                 if _err is not None:
-                    if not silent:
+                    if not silent and n_tickers <= 100:
                         print(f"   ⚠ {ticker}: {_err}")
                     _df = None
                 if _df is not None and not _df.empty and len(_df) >= 20:
                     market_data[ticker] = _df
-                    if not silent:
+                    if not silent and n_tickers <= 100:
                         print(f"   ✓ {ticker}: {len(_df)} 筆")
                 elif _end_d and _start_d:
                     try:
@@ -968,13 +981,13 @@ class ReishiV5:
                             _df2.index = _pd.to_datetime(_df2.index)
                             market_data[ticker] = _df2
                             data_source = "yfinance+MultiSource"
-                            if not silent:
+                            if not silent and n_tickers <= 100:
                                 print(f"   ✓ {ticker}: {len(_df2)} 筆（多數據源）")
                     except Exception:
-                        if not silent:
+                        if not silent and n_tickers <= 100:
                             print(f"   ⚠ {ticker}: 資料不足，跳過")
                 else:
-                    if not silent:
+                    if not silent and n_tickers <= 100:
                         print(f"   ⚠ {ticker}: 資料不足，跳過")
         return market_data, data_source
     
