@@ -1343,12 +1343,16 @@ def main():
         log_file, original_stdout = _start_log_v5(run_dir)
         try:
             print(f"\n📁 本次報告目錄: {run_dir}")
-            # 預計運行時間（正常模式：約 20 檔，每檔 1.5 秒 + LLM 90 秒）
-            stock_count = 20
-            est_sec = stock_count * 1.5 + 90
-            print(f"⏱ 預計運行時間：約 {est_sec/60:.1f} 分鐘（{stock_count} 檔股票）")
-            print("🔮 啟動霊視，洞察市場...\n")
             reishi = ReishiV5()
+            stock_count = len(reishi._get_scan_tickers())
+            # 預計運行時間：依實際掃描名單數量估算（每檔約 1.5 秒取數 + LLM 等）
+            est_sec = stock_count * 1.5 + 90
+            if est_sec >= 3600:
+                est_str = f"約 {est_sec/3600:.1f} 小時"
+            else:
+                est_str = f"約 {est_sec/60:.0f} 分鐘"
+            print(f"⏱ 預計運行時間：{est_str}（{stock_count} 檔股票）")
+            print("🔮 啟動霊視，洞察市場...\n")
             reishi.run_daily()
         finally:
             _stop_log_v5(log_file, original_stdout)
