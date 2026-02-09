@@ -51,6 +51,7 @@ def _placeholder_analysis(agent_name: str, ticker: str, reason: str = "無數據
 def _parse_agent_response(raw: str, agent_name: str, ticker: str) -> Optional[AgentAnalysis]:
     raw = (raw or "").strip()
     if not raw:
+        logger.warning(f"[Multi-Agent] {agent_name} 對 {ticker} 無回應")
         return None
     m = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw, re.IGNORECASE)
     if m:
@@ -80,7 +81,8 @@ def _parse_agent_response(raw: str, agent_name: str, ticker: str) -> Optional[Ag
             risks=risks,
             reasoning=reasoning or "（無）",
         )
-    except (json.JSONDecodeError, TypeError, ValueError):
+    except (json.JSONDecodeError, TypeError, ValueError) as e:
+        logger.warning(f"[Multi-Agent] {agent_name} 對 {ticker} 解析失敗: {e}")
         return None
 
 

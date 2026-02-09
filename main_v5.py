@@ -718,6 +718,9 @@ class ReishiV5:
                         if len(tickers) >= cap:
                             break
                     if tickers:
+                        if len(tickers) > cap:
+                            import random
+                            random.shuffle(tickers)
                         return tickers[:cap]
                 except Exception:
                     tickers = []
@@ -782,14 +785,9 @@ class ReishiV5:
                 if sym.upper() not in _seen:
                     tickers.append(sym)
                     _seen.add(sym.upper())
-        # #region agent log
-        try:
-            import json, time
-            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                _dbg.write(json.dumps({"hypothesisId": "H1", "location": "main_v5.py:602", "message": "_get_scan_tickers_exit", "data": {"cap": cap, "tickers_returned": len(tickers[:cap]), "first_10_returned": tickers[:cap][:10]}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
+        if len(tickers) > cap:
+            import random
+            random.shuffle(tickers)
         return tickers[:cap]
 
     def _fetch_and_validate_data(self, end_date=None, start_date=None, cap: int = 9000, silent: bool = False, on_ticker=None, on_fetch_progress=None):

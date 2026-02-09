@@ -14,7 +14,10 @@ Key 不足時：單一 LLM 可兼多角（依 fallback 順序使用第一個有 
 import os
 import requests
 import time
+import logging
 from typing import Optional, List, Tuple
+
+logger = logging.getLogger(__name__)
 
 # 與 v4.3 stage3 完全一致的配置
 PROVIDERS = (
@@ -100,9 +103,13 @@ class LLMClients:
         for pid in order:
             if pid not in self._keys:
                 continue
+            logger.info(f"[LLM] 嘗試使用 {pid} provider...")
             text = self._call_one(pid, prompt, system_prompt, timeout)
             if text is not None:
+                logger.info(f"[LLM] ✓ {pid} 成功，回應長度 {len(text)} 字")
                 return (text.strip(), pid)
+            logger.warning(f"[LLM] ✗ {pid} 失敗或無回應，嘗試下一個 provider")
+        logger.error(f"[LLM] 所有 providers 失敗，已嘗試：{order}")
         return ("", None)
 
     def _call_one(
