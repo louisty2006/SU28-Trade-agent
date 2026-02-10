@@ -244,7 +244,7 @@ class LLMClients:
                         "Authorization": f"Bearer {key}",
                         "Content-Type": "application/json",
                         "HTTP-Referer": "https://github.com/reishi",
-                        "X-Title": f"REISHI Stock Scanner ({label})",
+                        "X-Title": f"REISHI Stock Scanner ({provider_id})",
                     },
                     json={
                         "model": model,
