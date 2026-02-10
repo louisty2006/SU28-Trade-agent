@@ -1,8 +1,13 @@
 """
-REISHI 霊視 v5.0 - Multi-Agent 協作分析（AlphaRock 類格式）
+REISHI 霊視 v5.0 - Multi-Agent 協作分析（原設計完整版）
 
-三角色：Fundamental / Sentiment / Valuation(技術)，各用 LLM 產出；
+四角色：Fundamental / Technical / Sentiment / Risk，各用專屬 LLM 產出；
 單輪共識 LLM 產出 consensus_action、consensus_score、disagreements、final_recommendation。
+Provider 映射（與原設計一致）：
+- Fundamental Agent → Scitely（基本面分析）
+- Technical Agent → Cohere（技術面分析）
+- Sentiment Agent → OpenRouter（情緒分析）
+- Risk Agent → Mistral（風險評估）
 data 須包含 market_data、可選 fundamental_by_ticker、sentiment_by_ticker。
 """
 
@@ -112,7 +117,7 @@ def _parse_consensus_response(raw: str, ticker: str) -> Optional[tuple]:
 
 
 class MultiAgentAnalysis:
-    """Multi-Agent 協作：三角色 + 單輪共識（AlphaRock 類格式）。"""
+    """Multi-Agent 協作：四角色 + 單輪共識（原設計完整版）。"""
 
     def __init__(self):
         self._llm = None
@@ -158,20 +163,7 @@ class MultiAgentAnalysis:
         else:
             individual["Fundamental"] = _placeholder_analysis("Fundamental", ticker, "無基本面數據")
 
-        # --- Sentiment Agent (Mistral) ---
-        if sentiment is not None and getattr(sentiment, "key_factors", None):
-            sys_s = "你是情緒分析師。根據情緒結果，給出 BUY/HOLD/SELL、1-10 分、信心度、key_points、risks、reasoning。輸出單一 JSON，欄位: action, score, confidence, key_points, risks, reasoning。"
-            factors = getattr(sentiment, "key_factors", []) or []
-            risks_s = getattr(sentiment, "risks", []) or []
-            score_s = getattr(sentiment, "score", 0.5)
-            prompt_s = f"股票 {ticker} 情緒：score={score_s}，key_factors={factors}，risks={risks_s}\n\n請輸出 JSON。"
-            raw_s = self._call_agent(prompt_s, sys_s, "mistral")
-            a_s = _parse_agent_response(raw_s, "Sentiment", ticker) if raw_s else None
-            individual["Sentiment"] = a_s or _placeholder_analysis("Sentiment", ticker, "LLM 未回傳")
-        else:
-            individual["Sentiment"] = _placeholder_analysis("Sentiment", ticker, "無情緒數據")
-
-        # --- Valuation/Technical Agent (Cohere) ---
+        # --- Technical Agent (Cohere) ---
         tech_desc = "無 K 線數據"
         if df is not None and hasattr(df, "iloc") and len(df) >= 5:
             try:
@@ -181,20 +173,53 @@ class MultiAgentAnalysis:
                 tech_desc = f"收盤 {close:.2f}，近20日高 {high_20:.2f}，低 {low_20:.2f}"
             except Exception:
                 pass
-        sys_v = "你是估值/技術分析師。根據價格與技術描述，給出 BUY/HOLD/SELL、1-10 分、信心度、key_points、risks、reasoning。輸出單一 JSON，欄位: action, score, confidence, key_points, risks, reasoning。"
-        prompt_v = f"股票 {ticker} 技術/估值：{tech_desc}\n\n請輸出 JSON。"
-        raw_v = self._call_agent(prompt_v, sys_v, "cohere")
-        a_v = _parse_agent_response(raw_v, "Valuation", ticker) if raw_v else None
-        individual["Valuation"] = a_v or _placeholder_analysis("Valuation", ticker, tech_desc)
+        sys_t = "你是技術分析師。根據價格與技術指標，給出 BUY/HOLD/SELL、1-10 分、信心度、key_points、risks、reasoning。輸出單一 JSON，欄位: action, score, confidence, key_points, risks, reasoning。"
+        prompt_t = f"股票 {ticker} 技術描述：{tech_desc}\n\n請輸出 JSON。"
+        raw_t = self._call_agent(prompt_t, sys_t, "cohere")
+        a_t = _parse_agent_response(raw_t, "Technical", ticker) if raw_t else None
+        individual["Technical"] = a_t or _placeholder_analysis("Technical", ticker, tech_desc)
 
-        # --- Consensus (OpenRouter) ---
+        # --- Sentiment Agent (OpenRouter) ---
+        if sentiment is not None and getattr(sentiment, "key_factors", None):
+            sys_s = "你是情緒分析師。根據市場情緒和新聞分析，給出 BUY/HOLD/SELL、1-10 分、信心度、key_points、risks、reasoning。輸出單一 JSON，欄位: action, score, confidence, key_points, risks, reasoning。"
+            factors = getattr(sentiment, "key_factors", []) or []
+            risks_s = getattr(sentiment, "risks", []) or []
+            score_s = getattr(sentiment, "score", 0.5)
+            prompt_s = f"股票 {ticker} 市場情緒：score={score_s}，key_factors={factors}，risks={risks_s}\n\n請輸出 JSON。"
+            raw_s = self._call_agent(prompt_s, sys_s, "openrouter")
+            a_s = _parse_agent_response(raw_s, "Sentiment", ticker) if raw_s else None
+            individual["Sentiment"] = a_s or _placeholder_analysis("Sentiment", ticker, "LLM 未回傳")
+        else:
+            individual["Sentiment"] = _placeholder_analysis("Sentiment", ticker, "無情緒數據")
+
+        # --- Risk Agent (Mistral) ---
+        # 综合评估各种风险因素
+        risk_factors = []
+        if fundamental:
+            risk_factors.append(f"基本面數據：{getattr(fundamental, 'summary_text', '')[:100]}")
+        if sentiment:
+            risk_factors.append(f"情緒風險：{getattr(sentiment, 'risks', [])}")
+        if df is not None and hasattr(df, "iloc") and len(df) >= 5:
+            try:
+                volatility = df["Close"].pct_change().std() * 100
+                risk_factors.append(f"價格波動率：{volatility:.2f}%")
+            except Exception:
+                pass
+        risk_desc = "; ".join(risk_factors) if risk_factors else "無風險數據"
+        sys_r = "你是風險分析師。專注於識別下行風險、市場風險、公司特定風險。給出 BUY/HOLD/SELL、1-10 分（低分=高風險）、信心度、key_points、risks、reasoning。輸出單一 JSON，欄位: action, score, confidence, key_points, risks, reasoning。"
+        prompt_r = f"股票 {ticker} 風險評估：{risk_desc}\n\n請輸出風險分析 JSON。"
+        raw_r = self._call_agent(prompt_r, sys_r, "mistral")
+        a_r = _parse_agent_response(raw_r, "Risk", ticker) if raw_r else None
+        individual["Risk"] = a_r or _placeholder_analysis("Risk", ticker, risk_desc)
+
+        # --- Consensus (Scitely - 最終協調者) ---
         lines = []
         for name, ana in individual.items():
             lines.append(f"{name}: action={ana.action}, score={ana.score}, reasoning={ana.reasoning[:150]}")
         consensus_text = "\n".join(lines)
-        sys_c = "你是協調者。根據三位分析師的結論，輸出共識。JSON 欄位: consensus_action (BUY/HOLD/SELL), consensus_score (1-10), disagreements (字串陣列), final_recommendation (一句話建議)。"
-        prompt_c = f"股票 {ticker} 三位分析師結論：\n{consensus_text}\n\n請輸出共識 JSON。"
-        raw_c = self._call_agent(prompt_c, sys_c, "openrouter")
+        sys_c = "你是最終協調者。根據四位分析師（基本面、技術面、情緒、風險）的結論，整合出共識決策。JSON 欄位: consensus_action (BUY/HOLD/SELL), consensus_score (1-10), disagreements (字串陣列), final_recommendation (一句話建議)。"
+        prompt_c = f"股票 {ticker} 四位分析師結論：\n{consensus_text}\n\n請輸出共識 JSON。"
+        raw_c = self._call_agent(prompt_c, sys_c, "scitely")
         parsed = _parse_consensus_response(raw_c, ticker) if raw_c else None
         if parsed:
             action, score, disagreements, rec = parsed
@@ -229,7 +254,7 @@ class MultiAgentAnalysis:
         by_ticker: Dict[str, MultiAgentResult] = {}
         tickers_done = []
         if total > 0:
-            print(f"[REISHI] [Multi-Agent] 開始分析 {total} 檔（每檔約 4 次 LLM），每 20 檔顯示擇要…", flush=True)
+            print(f"[REISHI] [Multi-Agent] 開始分析 {total} 檔（每檔 5 次 LLM：Fundamental/Technical/Sentiment/Risk + Consensus），每 20 檔顯示擇要…", flush=True)
         for idx, c in enumerate(cand_list):
             ticker = getattr(c, "ticker", None)
             if not ticker:
