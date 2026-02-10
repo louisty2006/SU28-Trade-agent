@@ -73,8 +73,8 @@ CONFIG = {
 }
 
 # 預設 fallback 順序（key 不足時依序嘗試）
-# 當前 OpenRouter 有速率限制，優先使用 Mistral
-FALLBACK_ORDER: List[str] = ["mistral", "ollama", "openrouter", "openrouter2"]
+# OpenRouter 雙帳號輪替 + 智能重試，遇到速率限制會自動切換
+FALLBACK_ORDER: List[str] = ["openrouter", "openrouter2", "mistral", "ollama"]
 
 
 class LLMClients:
@@ -305,66 +305,114 @@ class LLMClients:
         key = self._keys["openrouter"]
         model = self._models["openrouter"]
         msgs = self._messages(prompt, system_prompt)
-        try:
-            r = requests.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": msgs,
-                    "temperature": 0.3,
-                    "max_tokens": 4000,
-                },
-                timeout=timeout,
-            )
-            if r.status_code == 200:
-                return (
-                    r.json()
-                    .get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
+
+        # 智能重試：遇到速率限制時等待後重試
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                r = requests.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://github.com/reishi",
+                        "X-Title": "REISHI Stock Scanner",
+                    },
+                    json={
+                        "model": model,
+                        "messages": msgs,
+                        "temperature": 0.3,
+                        "max_tokens": 4000,
+                    },
+                    timeout=timeout,
                 )
-        except Exception:
-            pass
+
+                if r.status_code == 200:
+                    return (
+                        r.json()
+                        .get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                    )
+                elif r.status_code == 429:
+                    # 速率限制：等待後重試
+                    wait_time = 2 ** attempt  # 指數退避：1s, 2s, 4s
+                    logger.warning(f"[OpenRouter] 速率限制 (429)，等待 {wait_time}s 後重試... (嘗試 {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.warning(f"[OpenRouter] HTTP {r.status_code}: {r.text[:200]}")
+                    return None
+
+            except requests.exceptions.Timeout:
+                logger.warning(f"[OpenRouter] 超時，嘗試 {attempt + 1}/{max_retries}")
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+            except Exception as e:
+                logger.warning(f"[OpenRouter] 異常: {e}")
+                pass
+
         return None
 
     def _call_openrouter2(
         self, prompt: str, system_prompt: Optional[str], timeout: int
     ) -> Optional[str]:
-        """第二個 OpenRouter 帳號（Reishi02）"""
+        """第二個 OpenRouter 帳號（Reishi02）- 帶智能重試"""
         url = CONFIG["openrouter2"]["url"]
         key = self._keys.get("openrouter2")
         if not key:
             return None
         model = self._models.get("openrouter2", CONFIG["openrouter2"]["model_default"])
         msgs = self._messages(prompt, system_prompt)
-        try:
-            r = requests.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": msgs,
-                    "temperature": 0.3,
-                    "max_tokens": 4000,
-                },
-                timeout=timeout,
-            )
-            if r.status_code == 200:
-                return (
-                    r.json()
-                    .get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
+
+        # 智能重試：遇到速率限制時等待後重試
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                r = requests.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://github.com/reishi",
+                        "X-Title": "REISHI Stock Scanner (Account 2)",
+                    },
+                    json={
+                        "model": model,
+                        "messages": msgs,
+                        "temperature": 0.3,
+                        "max_tokens": 4000,
+                    },
+                    timeout=timeout,
                 )
-        except Exception:
-            pass
+
+                if r.status_code == 200:
+                    return (
+                        r.json()
+                        .get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                    )
+                elif r.status_code == 429:
+                    # 速率限制：等待後重試
+                    wait_time = 2 ** attempt  # 指數退避：1s, 2s, 4s
+                    logger.warning(f"[OpenRouter2] 速率限制 (429)，等待 {wait_time}s 後重試... (嘗試 {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.warning(f"[OpenRouter2] HTTP {r.status_code}: {r.text[:200]}")
+                    return None
+
+            except requests.exceptions.Timeout:
+                logger.warning(f"[OpenRouter2] 超時，嘗試 {attempt + 1}/{max_retries}")
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+            except Exception as e:
+                logger.warning(f"[OpenRouter2] 異常: {e}")
+                pass
+
         return None
 
     def _call_routeway(
