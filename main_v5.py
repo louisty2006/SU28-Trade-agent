@@ -144,6 +144,7 @@ class ReishiV5:
         """
         from reporting.flow_logger import FlowLogger
         from reporting.master_flow_logger import init_master_flow_logger
+        from reporting.run_index_generator import update_run_index
         from core.llm_clients import set_master_flow_logger
 
         print("\n" + "=" * 70)
@@ -153,7 +154,8 @@ class ReishiV5:
 
         # 初始化完整執行日誌系統
         timestamp_str = datetime.now().strftime('%Y-%m-%d_%H%M%S')
-        full_run_report_dir = f"reports/daily/{timestamp_str}"
+        # 新結構：reports/runs/[timestamp]/ 集中所有檔案
+        full_run_report_dir = f"reports/runs/{timestamp_str}"
         master_flow_logger = init_master_flow_logger(full_run_report_dir)
         set_master_flow_logger(master_flow_logger)  # 讓 llm_clients 能夠記錄呼叫
         print(f"📝 完整運行日誌目錄: {full_run_report_dir}\n")
@@ -428,6 +430,9 @@ class ReishiV5:
             print(f"   - Master Log: {summary['master_log']}")
             print(f"   - LLM Calls: {summary['llm_log']}")
             print(f"   - Data Flow: {summary['data_flow_log']}")
+
+            # 更新運行索引
+            update_run_index()
 
             self.notifier.send_daily_report(report)
             print("\n" + "=" * 70)

@@ -20,7 +20,7 @@ from typing import Optional, Dict, List
 class FullRunLogViewer:
     """查看和分析完整運行日誌"""
 
-    BASE_DIR = Path("reports/daily")
+    BASE_DIR = Path("reports/runs")  # 新結構：集中所有 runs
 
     def __init__(self):
         self.base_dir = self.BASE_DIR
