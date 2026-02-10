@@ -70,7 +70,24 @@ def _parse_agent_response(raw: str, agent_name: str, ticker: str) -> Optional[Ag
             action = "HOLD"
         score = float(data.get("score", 5))
         score = max(1, min(10, score))
-        confidence = float(data.get("confidence", 0.5))
+
+        # 改進：支持文字格式的 confidence 映射為數字
+        conf_raw = data.get("confidence", 0.5)
+        if isinstance(conf_raw, str):
+            conf_str = conf_raw.upper()
+            if conf_str in ("LOW", "L"):
+                confidence = 0.3
+            elif conf_str in ("MEDIUM", "MED", "M"):
+                confidence = 0.5
+            elif conf_str in ("HIGH", "H"):
+                confidence = 0.8
+            else:
+                try:
+                    confidence = float(conf_raw)
+                except ValueError:
+                    confidence = 0.5
+        else:
+            confidence = float(conf_raw)
         confidence = max(0, min(1, confidence))
         kp = data.get("key_points") or data.get("key_points_list") or []
         key_points = [str(x) for x in (kp if isinstance(kp, list) else [])[:5]]
@@ -155,8 +172,8 @@ class MultiAgentAnalysis:
 
         # --- Fundamental Agent (Scitely) ---
         if fundamental is not None and getattr(fundamental, "summary_text", None):
-            sys_f = "你是基本面分析師。根據提供的財務摘要，給出 BUY/HOLD/SELL、1-10 分、信心度、key_points、risks、reasoning。輸出單一 JSON，欄位: action, score, confidence, key_points (陣列), risks (陣列), reasoning。"
-            prompt_f = f"股票 {ticker} 基本面摘要：\n{getattr(fundamental, 'summary_text', '')}\n\n請輸出 JSON。"
+            sys_f = "你是基本面分析師。根據提供的財務摘要，給出 BUY/HOLD/SELL、1-10 分、信心度、key_points、risks、reasoning。輸出單一 JSON，欄位: action, score (數字1-10), confidence (數字0-1，例如0.7), key_points (字串陣列), risks (字串陣列), reasoning (字串)。"
+            prompt_f = f"股票 {ticker} 基本面摘要：\n{getattr(fundamental, 'summary_text', '')}\n\n請輸出 JSON，格式範例：{{\"action\":\"HOLD\",\"score\":6,\"confidence\":0.65,\"key_points\":[\"...\"],\"risks\":[\"...\"],\"reasoning\":\"...\"}}"
             raw_f = self._call_agent(prompt_f, sys_f, "scitely")
             a_f = _parse_agent_response(raw_f, "Fundamental", ticker) if raw_f else None
             individual["Fundamental"] = a_f or _placeholder_analysis("Fundamental", ticker, "LLM 未回傳")
@@ -173,19 +190,19 @@ class MultiAgentAnalysis:
                 tech_desc = f"收盤 {close:.2f}，近20日高 {high_20:.2f}，低 {low_20:.2f}"
             except Exception:
                 pass
-        sys_t = "你是技術分析師。根據價格與技術指標，給出 BUY/HOLD/SELL、1-10 分、信心度、key_points、risks、reasoning。輸出單一 JSON，欄位: action, score, confidence, key_points, risks, reasoning。"
-        prompt_t = f"股票 {ticker} 技術描述：{tech_desc}\n\n請輸出 JSON。"
+        sys_t = "你是技術分析師。根據價格與技術指標，給出 BUY/HOLD/SELL、1-10 分、信心度、key_points、risks、reasoning。輸出單一 JSON，欄位: action, score (數字1-10), confidence (數字0-1，例如0.7), key_points (字串陣列), risks (字串陣列), reasoning (字串)。"
+        prompt_t = f"股票 {ticker} 技術描述：{tech_desc}\n\n請輸出 JSON，格式範例：{{\"action\":\"HOLD\",\"score\":6,\"confidence\":0.65,\"key_points\":[\"...\"],\"risks\":[\"...\"],\"reasoning\":\"...\"}}"
         raw_t = self._call_agent(prompt_t, sys_t, "cohere")
         a_t = _parse_agent_response(raw_t, "Technical", ticker) if raw_t else None
         individual["Technical"] = a_t or _placeholder_analysis("Technical", ticker, tech_desc)
 
         # --- Sentiment Agent (OpenRouter) ---
         if sentiment is not None and getattr(sentiment, "key_factors", None):
-            sys_s = "你是情緒分析師。根據市場情緒和新聞分析，給出 BUY/HOLD/SELL、1-10 分、信心度、key_points、risks、reasoning。輸出單一 JSON，欄位: action, score, confidence, key_points, risks, reasoning。"
+            sys_s = "你是情緒分析師。根據市場情緒和新聞分析，給出 BUY/HOLD/SELL、1-10 分、信心度、key_points、risks、reasoning。輸出單一 JSON，欄位: action, score (數字1-10), confidence (數字0-1，例如0.7), key_points (字串陣列), risks (字串陣列), reasoning (字串)。"
             factors = getattr(sentiment, "key_factors", []) or []
             risks_s = getattr(sentiment, "risks", []) or []
             score_s = getattr(sentiment, "score", 0.5)
-            prompt_s = f"股票 {ticker} 市場情緒：score={score_s}，key_factors={factors}，risks={risks_s}\n\n請輸出 JSON。"
+            prompt_s = f"股票 {ticker} 市場情緒：score={score_s}，key_factors={factors}，risks={risks_s}\n\n請輸出 JSON，格式範例：{{\"action\":\"HOLD\",\"score\":6,\"confidence\":0.65,\"key_points\":[\"...\"],\"risks\":[\"...\"],\"reasoning\":\"...\"}}"
             raw_s = self._call_agent(prompt_s, sys_s, "openrouter")
             a_s = _parse_agent_response(raw_s, "Sentiment", ticker) if raw_s else None
             individual["Sentiment"] = a_s or _placeholder_analysis("Sentiment", ticker, "LLM 未回傳")
@@ -206,8 +223,8 @@ class MultiAgentAnalysis:
             except Exception:
                 pass
         risk_desc = "; ".join(risk_factors) if risk_factors else "無風險數據"
-        sys_r = "你是風險分析師。專注於識別下行風險、市場風險、公司特定風險。給出 BUY/HOLD/SELL、1-10 分（低分=高風險）、信心度、key_points、risks、reasoning。輸出單一 JSON，欄位: action, score, confidence, key_points, risks, reasoning。"
-        prompt_r = f"股票 {ticker} 風險評估：{risk_desc}\n\n請輸出風險分析 JSON。"
+        sys_r = "你是風險分析師。專注於識別下行風險、市場風險、公司特定風險。給出 BUY/HOLD/SELL、1-10 分（低分=高風險）、信心度、key_points、risks、reasoning。輸出單一 JSON，欄位: action, score (數字1-10), confidence (數字0-1，例如0.7), key_points (字串陣列), risks (字串陣列), reasoning (字串)。"
+        prompt_r = f"股票 {ticker} 風險評估：{risk_desc}\n\n請輸出風險分析 JSON，格式範例：{{\"action\":\"HOLD\",\"score\":6,\"confidence\":0.65,\"key_points\":[\"...\"],\"risks\":[\"...\"],\"reasoning\":\"...\"}}"
         raw_r = self._call_agent(prompt_r, sys_r, "mistral")
         a_r = _parse_agent_response(raw_r, "Risk", ticker) if raw_r else None
         individual["Risk"] = a_r or _placeholder_analysis("Risk", ticker, risk_desc)

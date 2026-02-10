@@ -19,29 +19,14 @@ from typing import Optional, List, Tuple
 
 logger = logging.getLogger(__name__)
 
-# 與 v4.3 stage3 完全一致的配置
+# 與 v4.3 stage3 完全一致的配置 + openrouter2 + routeway
 PROVIDERS = (
-    "scitely",
-    "cohere",
     "mistral",
     "openrouter",
+    "ollama",
 )
 
 CONFIG = {
-    "scitely": {
-        "name": "基本面",
-        "api_key_env": "SCITELY_API_KEY",
-        "model_env": "SCITELY_MODEL",
-        "model_default": "qwen3-235b-a22b-instruct",
-        "url": "https://api.scitely.com/v1/chat/completions",
-    },
-    "cohere": {
-        "name": "技術面",
-        "api_key_env": "COHERE_API_KEY",
-        "model_env": "COHERE_MODEL",
-        "model_default": "command-a-03-2025",
-        "url": "https://api.cohere.com/v2/chat",
-    },
     "mistral": {
         "name": "風險",
         "api_key_env": "MISTRAL_API_KEY",
@@ -53,13 +38,20 @@ CONFIG = {
         "name": "宏觀",
         "api_key_env": "OPENROUTER_API_KEY",
         "model_env": "OPENROUTER_MODEL",
-        "model_default": "meta-llama/llama-3.1-8b-instruct",
+        "model_default": "meta-llama/llama-3.2-3b-instruct:free",
         "url": "https://openrouter.ai/api/v1/chat/completions",
+    },
+    "ollama": {
+        "name": "本地 DeepSeek",
+        "api_key_env": "OLLAMA_API_KEY",
+        "model_env": "OLLAMA_MODEL",
+        "model_default": "deepseek-r1:14b",
+        "url": "http://localhost:11434/api/chat",
     },
 }
 
 # 預設 fallback 順序（key 不足時依序嘗試）
-FALLBACK_ORDER: List[str] = ["scitely", "cohere", "mistral", "openrouter"]
+FALLBACK_ORDER: List[str] = ["mistral", "openrouter", "ollama"]
 
 
 class LLMClients:
@@ -127,6 +119,14 @@ class LLMClients:
             return self._call_mistral(prompt, system_prompt, timeout)
         if provider_id == "openrouter":
             return self._call_openrouter(prompt, system_prompt, timeout)
+        if provider_id == "openrouter2":
+            return self._call_openrouter2(prompt, system_prompt, timeout)
+        if provider_id == "routeway":
+            return self._call_routeway(prompt, system_prompt, timeout)
+        if provider_id == "huggingface":
+            return self._call_huggingface(prompt, system_prompt, timeout)
+        if provider_id == "ollama":
+            return self._call_ollama(prompt, system_prompt, timeout)
         return None
 
     def _messages(self, prompt: str, system_prompt: Optional[str]):
@@ -267,4 +267,150 @@ class LLMClients:
                 )
         except Exception:
             pass
+        return None
+
+    def _call_openrouter2(
+        self, prompt: str, system_prompt: Optional[str], timeout: int
+    ) -> Optional[str]:
+        """第二個 OpenRouter 帳號（Reishi02）"""
+        url = CONFIG["openrouter2"]["url"]
+        key = self._keys.get("openrouter2")
+        if not key:
+            return None
+        model = self._models.get("openrouter2", CONFIG["openrouter2"]["model_default"])
+        msgs = self._messages(prompt, system_prompt)
+        try:
+            r = requests.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": msgs,
+                    "temperature": 0.3,
+                    "max_tokens": 4000,
+                },
+                timeout=timeout,
+            )
+            if r.status_code == 200:
+                return (
+                    r.json()
+                    .get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                )
+        except Exception:
+            pass
+        return None
+
+    def _call_routeway(
+        self, prompt: str, system_prompt: Optional[str], timeout: int
+    ) -> Optional[str]:
+        """Routeway.ai - DeepSeek R1"""
+        url = CONFIG["routeway"]["url"]
+        key = self._keys.get("routeway")
+        if not key:
+            return None
+        model = self._models.get("routeway", CONFIG["routeway"]["model_default"])
+        msgs = self._messages(prompt, system_prompt)
+        try:
+            r = requests.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": msgs,
+                    "temperature": 0.3,
+                    "max_tokens": 4000,
+                },
+                timeout=timeout,
+            )
+            if r.status_code == 200:
+                return (
+                    r.json()
+                    .get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                )
+        except Exception:
+            pass
+        return None
+
+    def _call_huggingface(
+        self, prompt: str, system_prompt: Optional[str], timeout: int
+    ) -> Optional[str]:
+        """HuggingFace Inference Router API"""
+        key = self._keys.get("huggingface")
+        if not key:
+            return None
+        model = self._models.get("huggingface", CONFIG["huggingface"]["model_default"])
+        url = f"https://router.huggingface.co/models/{model}"
+
+        # HuggingFace 使用不同的请求格式
+        full_prompt = ""
+        if system_prompt:
+            full_prompt = f"{system_prompt}\n\n"
+        full_prompt += prompt
+
+        try:
+            r = requests.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "inputs": full_prompt,
+                    "parameters": {
+                        "max_new_tokens": 512,
+                        "temperature": 0.3,
+                    }
+                },
+                timeout=timeout,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                # HuggingFace 返回格式：[{"generated_text": "..."}]
+                if isinstance(data, list) and len(data) > 0:
+                    text = data[0].get("generated_text", "")
+                    # 移除输入提示部分，只返回生成的部分
+                    if text.startswith(full_prompt):
+                        text = text[len(full_prompt):].strip()
+                    return text
+                return ""
+        except Exception:
+            pass
+        return None
+
+    def _call_ollama(
+        self, prompt: str, system_prompt: Optional[str], timeout: int
+    ) -> Optional[str]:
+        """Ollama 本地 LLM 調用"""
+        url = CONFIG["ollama"]["url"]
+        model = self._models.get("ollama", CONFIG["ollama"]["model_default"])
+        msgs = self._messages(prompt, system_prompt)
+        try:
+            r = requests.post(
+                url,
+                json={
+                    "model": model,
+                    "messages": msgs,
+                    "temperature": 0.3,
+                    "stream": False,
+                },
+                timeout=timeout,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                return (
+                    data.get("message", {})
+                    .get("content", "")
+                )
+        except Exception as e:
+            logger.warning(f"[Ollama] 調用失敗: {e}")
         return None
