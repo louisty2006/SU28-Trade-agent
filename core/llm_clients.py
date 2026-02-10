@@ -73,7 +73,8 @@ CONFIG = {
 }
 
 # 預設 fallback 順序（key 不足時依序嘗試）
-FALLBACK_ORDER: List[str] = ["mistral", "openrouter", "openrouter2", "ollama"]
+# 當前 OpenRouter 有速率限制，優先使用 Mistral
+FALLBACK_ORDER: List[str] = ["mistral", "ollama", "openrouter", "openrouter2"]
 
 
 class LLMClients:
