@@ -73,8 +73,8 @@ CONFIG = {
 }
 
 # 預設 fallback 順序（key 不足時依序嘗試）
-# OpenRouter 雙帳號輪替 + 智能重試，遇到速率限制會自動切換
-FALLBACK_ORDER: List[str] = ["openrouter", "openrouter2", "mistral", "ollama"]
+# Mistral 優先，OpenRouter 雙帳號作為 fallback
+FALLBACK_ORDER: List[str] = ["mistral", "openrouter", "openrouter2", "ollama"]
 
 
 class LLMClients:
