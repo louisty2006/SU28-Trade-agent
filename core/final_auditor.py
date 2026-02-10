@@ -51,7 +51,7 @@ class FinalAuditor:
 記住：你是審計員，不是分析師。只檢查，不判斷。
 """
     
-    def __init__(self, llm_client=None):
+    def __init__(self):
         self._llm = None
 
     def _get_llm(self):
@@ -91,7 +91,9 @@ class FinalAuditor:
                 audit_prompt,
                 system_prompt=self.SYSTEM_PROMPT,
                 provider_hint="scitely",
-                timeout=60
+                timeout=60,
+                step_index=9, step_name="最終審計",
+                agent_role="Final Auditor",
             )
 
             if response:

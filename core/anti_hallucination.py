@@ -14,8 +14,6 @@ LLM 對接：支援 OpenRouter / Scitely（OpenAI-compatible API）
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Any
 import json
-import hashlib
-import os
 
 
 @dataclass
@@ -61,7 +59,6 @@ class AntiHallucination:
         與 v4.3 相同：四 LLM（Scitely, Cohere, Mistral, OpenRouter）。
         Key 不足時一 LLM 兼多角，框架不變。llm_client 參數保留相容，實際一律用四供應商。
         """
-        self._call_history = {}  # 记录调用历史，用于检测重复
         from core.llm_clients import LLMClients
         self._llm_clients = LLMClients()
         self.llm = self._llm_clients.has_any_key()
@@ -100,7 +97,8 @@ class AntiHallucination:
             return self._mock_response(prompt, provided_data), None
         
         # 实际调用（需要集成真实LLM）
-        raw_response, used_provider = self._call_llm(protected_prompt, system_prompt)
+        phase = getattr(self, '_current_critique_phase', 'Anti-Hallucination LLM')
+        raw_response, used_provider = self._call_llm(protected_prompt, system_prompt, agent_role=phase)
         
         # 验证响应
         validated_response = self._validate_response(raw_response, provided_data)
@@ -161,28 +159,33 @@ class AntiHallucination:
             original_prompt=prompt
         )
     
-    def _call_llm(self, prompt: str, system_prompt: Optional[str] = None) -> tuple:
+    @staticmethod
+    def _empty_response_json(conclusion: str, confidence: float = 0.5, uncertainties: Optional[List] = None) -> str:
+        """生成空的防幻覺 JSON 回應"""
+        return json.dumps({
+            "facts": [],
+            "inferences": [],
+            "uncertainties": uncertainties or [],
+            "conclusion": conclusion,
+            "overall_confidence": confidence,
+        }, ensure_ascii=False)
+
+    def _call_llm(self, prompt: str, system_prompt: Optional[str] = None, agent_role: str = "Anti-Hallucination LLM") -> tuple:
         """
-        調用 LLM：與 v4.3 相同四供應商（Scitely, Cohere, Mistral, OpenRouter）。
-        回傳 (response_json_str, used_provider_id or None)。
+        調用 LLM。回傳 (response_json_str, used_provider_id or None)。
         """
         if not self._llm_clients or not self._llm_clients.has_any_key():
-            return json.dumps({
-                "facts": [],
-                "inferences": [],
-                "uncertainties": [],
-                "conclusion": "LLM未配置（請設 SCITELY/COHERE/MISTRAL/OPENROUTER 任一 API Key）",
-                "overall_confidence": 0.5
-            }, ensure_ascii=False), None
-        text, used = self._llm_clients.call(prompt, system_prompt, provider_hint=None, timeout=120)
+            return self._empty_response_json("LLM未配置（請設 MISTRAL/OPENROUTER 任一 API Key）"), None
+        text, used = self._llm_clients.call(
+            prompt, system_prompt, provider_hint=None, timeout=120,
+            step_index=8, step_name="決策引擎（防幻覺）",
+            agent_role=agent_role,
+        )
         if not text:
-            return json.dumps({
-                "facts": [],
-                "inferences": [],
-                "uncertainties": [{"statement": "API 無回應", "reason": "請檢查 Key 與額度"}],
-                "conclusion": "LLM 無回應",
-                "overall_confidence": 0.0
-            }, ensure_ascii=False), None
+            return self._empty_response_json(
+                "LLM 無回應", 0.0,
+                [{"statement": "API 無回應", "reason": "請檢查 Key 與額度"}],
+            ), None
         return text, used
     
     def _validate_response(self, response: str, provided_data: Dict) -> ProtectedResponse:
@@ -272,6 +275,7 @@ class AntiHallucination:
         """
         if callable(on_llm_progress):
             on_llm_progress(1, 3, "初次分析", None)
+        self._current_critique_phase = "Phase 1: 初次分析"
         initial_analysis, used1 = self.query_with_protection(prompt, provided_data)
         if callable(on_llm_progress):
             on_llm_progress(1, 3, "初次分析", self._provider_display(used1))
@@ -290,6 +294,7 @@ class AntiHallucination:
 
 請誠實、嚴格地審視。
 """
+        self._current_critique_phase = "Phase 2: 自我質疑"
         critique, used2 = self.query_with_protection(critique_prompt, provided_data, require_sources=False)
         if callable(on_llm_progress):
             on_llm_progress(2, 3, "自我質疑", self._provider_display(used2))
@@ -306,6 +311,7 @@ class AntiHallucination:
 根據質疑，請修正你的分析和信心度。
 如果質疑發現了問題，降低信心度或修改結論。
 """
+        self._current_critique_phase = "Phase 3: 修正結論"
         final_analysis, used3 = self.query_with_protection(correction_prompt, provided_data)
         if callable(on_llm_progress):
             on_llm_progress(3, 3, "修正結論", self._provider_display(used3))
@@ -380,9 +386,3 @@ class AntiHallucination:
             disagreements=disagreements
         )
     
-    def get_call_statistics(self) -> Dict:
-        """获取调用统计"""
-        return {
-            "total_calls": len(self._call_history),
-            "unique_queries": len(set(self._call_history.keys()))
-        }

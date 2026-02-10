@@ -173,20 +173,10 @@ class LLMClients:
         system_prompt: Optional[str],
         timeout: int,
     ) -> Optional[str]:
-        if provider_id == "scitely":
-            return self._call_scitely(prompt, system_prompt, timeout)
-        if provider_id == "cohere":
-            return self._call_cohere(prompt, system_prompt, timeout)
         if provider_id == "mistral":
             return self._call_mistral(prompt, system_prompt, timeout)
-        if provider_id == "openrouter":
-            return self._call_openrouter(prompt, system_prompt, timeout)
-        if provider_id == "openrouter2":
-            return self._call_openrouter2(prompt, system_prompt, timeout)
-        if provider_id == "routeway":
-            return self._call_routeway(prompt, system_prompt, timeout)
-        if provider_id == "huggingface":
-            return self._call_huggingface(prompt, system_prompt, timeout)
+        if provider_id in ("openrouter", "openrouter2"):
+            return self._call_openrouter(prompt, system_prompt, timeout, provider_id=provider_id)
         if provider_id == "ollama":
             return self._call_ollama(prompt, system_prompt, timeout)
         return None
@@ -197,73 +187,6 @@ class LLMClients:
             msgs.append({"role": "system", "content": system_prompt})
         msgs.append({"role": "user", "content": prompt})
         return msgs
-
-    def _call_scitely(
-        self, prompt: str, system_prompt: Optional[str], timeout: int
-    ) -> Optional[str]:
-        url = CONFIG["scitely"]["url"]
-        key = self._keys["scitely"]
-        model = self._models["scitely"]
-        msgs = self._messages(prompt, system_prompt)
-        for attempt in range(3):
-            try:
-                r = requests.post(
-                    url,
-                    headers={
-                        "Authorization": f"Bearer {key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "messages": msgs,
-                        "temperature": 0.3,
-                        "max_tokens": 4000,
-                    },
-                    timeout=timeout,
-                )
-                if r.status_code == 200:
-                    return (
-                        r.json()
-                        .get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content", "")
-                    )
-                if 500 <= r.status_code < 600 and attempt < 2:
-                    time.sleep(3 + attempt * 2)
-                    continue
-            except Exception:
-                if attempt < 2:
-                    time.sleep(2)
-        return None
-
-    def _call_cohere(
-        self, prompt: str, system_prompt: Optional[str], timeout: int
-    ) -> Optional[str]:
-        url = CONFIG["cohere"]["url"]
-        key = self._keys["cohere"]
-        model = self._models["cohere"]
-        msgs = self._messages(prompt, system_prompt)
-        try:
-            r = requests.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": msgs,
-                    "temperature": 0.3,
-                },
-                timeout=timeout,
-            )
-            if r.status_code == 200:
-                data = r.json()
-                content = data.get("message", {}).get("content", [])
-                return content[0].get("text", "") if content else ""
-        except Exception:
-            pass
-        return None
 
     def _call_mistral(
         self, prompt: str, system_prompt: Optional[str], timeout: int
@@ -299,14 +222,19 @@ class LLMClients:
         return None
 
     def _call_openrouter(
-        self, prompt: str, system_prompt: Optional[str], timeout: int
+        self, prompt: str, system_prompt: Optional[str], timeout: int,
+        provider_id: str = "openrouter",
     ) -> Optional[str]:
-        url = CONFIG["openrouter"]["url"]
-        key = self._keys["openrouter"]
-        model = self._models["openrouter"]
+        """OpenRouter 呼叫（支援雙帳號：openrouter / openrouter2）"""
+        cfg = CONFIG[provider_id]
+        url = cfg["url"]
+        key = self._keys.get(provider_id)
+        if not key:
+            return None
+        model = self._models.get(provider_id, cfg["model_default"])
         msgs = self._messages(prompt, system_prompt)
+        label = cfg["name"]
 
-        # 智能重試：遇到速率限制時等待後重試
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -316,7 +244,7 @@ class LLMClients:
                         "Authorization": f"Bearer {key}",
                         "Content-Type": "application/json",
                         "HTTP-Referer": "https://github.com/reishi",
-                        "X-Title": "REISHI Stock Scanner",
+                        "X-Title": f"REISHI Stock Scanner ({label})",
                     },
                     json={
                         "model": model,
@@ -335,166 +263,22 @@ class LLMClients:
                         .get("content", "")
                     )
                 elif r.status_code == 429:
-                    # 速率限制：等待後重試
-                    wait_time = 2 ** attempt  # 指數退避：1s, 2s, 4s
-                    logger.warning(f"[OpenRouter] 速率限制 (429)，等待 {wait_time}s 後重試... (嘗試 {attempt + 1}/{max_retries})")
+                    wait_time = 2 ** attempt
+                    logger.warning(f"[{label}] 速率限制 (429)，等待 {wait_time}s 後重試... (嘗試 {attempt + 1}/{max_retries})")
                     time.sleep(wait_time)
                     continue
                 else:
-                    logger.warning(f"[OpenRouter] HTTP {r.status_code}: {r.text[:200]}")
+                    logger.warning(f"[{label}] HTTP {r.status_code}: {r.text[:200]}")
                     return None
 
             except requests.exceptions.Timeout:
-                logger.warning(f"[OpenRouter] 超時，嘗試 {attempt + 1}/{max_retries}")
+                logger.warning(f"[{label}] 超時，嘗試 {attempt + 1}/{max_retries}")
                 if attempt < max_retries - 1:
                     time.sleep(1)
                     continue
             except Exception as e:
-                logger.warning(f"[OpenRouter] 異常: {e}")
-                pass
+                logger.warning(f"[{label}] 異常: {e}")
 
-        return None
-
-    def _call_openrouter2(
-        self, prompt: str, system_prompt: Optional[str], timeout: int
-    ) -> Optional[str]:
-        """第二個 OpenRouter 帳號（Reishi02）- 帶智能重試"""
-        url = CONFIG["openrouter2"]["url"]
-        key = self._keys.get("openrouter2")
-        if not key:
-            return None
-        model = self._models.get("openrouter2", CONFIG["openrouter2"]["model_default"])
-        msgs = self._messages(prompt, system_prompt)
-
-        # 智能重試：遇到速率限制時等待後重試
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                r = requests.post(
-                    url,
-                    headers={
-                        "Authorization": f"Bearer {key}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "https://github.com/reishi",
-                        "X-Title": "REISHI Stock Scanner (Account 2)",
-                    },
-                    json={
-                        "model": model,
-                        "messages": msgs,
-                        "temperature": 0.3,
-                        "max_tokens": 4000,
-                    },
-                    timeout=timeout,
-                )
-
-                if r.status_code == 200:
-                    return (
-                        r.json()
-                        .get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content", "")
-                    )
-                elif r.status_code == 429:
-                    # 速率限制：等待後重試
-                    wait_time = 2 ** attempt  # 指數退避：1s, 2s, 4s
-                    logger.warning(f"[OpenRouter2] 速率限制 (429)，等待 {wait_time}s 後重試... (嘗試 {attempt + 1}/{max_retries})")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    logger.warning(f"[OpenRouter2] HTTP {r.status_code}: {r.text[:200]}")
-                    return None
-
-            except requests.exceptions.Timeout:
-                logger.warning(f"[OpenRouter2] 超時，嘗試 {attempt + 1}/{max_retries}")
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-                    continue
-            except Exception as e:
-                logger.warning(f"[OpenRouter2] 異常: {e}")
-                pass
-
-        return None
-
-    def _call_routeway(
-        self, prompt: str, system_prompt: Optional[str], timeout: int
-    ) -> Optional[str]:
-        """Routeway.ai - DeepSeek R1"""
-        url = CONFIG["routeway"]["url"]
-        key = self._keys.get("routeway")
-        if not key:
-            return None
-        model = self._models.get("routeway", CONFIG["routeway"]["model_default"])
-        msgs = self._messages(prompt, system_prompt)
-        try:
-            r = requests.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": msgs,
-                    "temperature": 0.3,
-                    "max_tokens": 4000,
-                },
-                timeout=timeout,
-            )
-            if r.status_code == 200:
-                return (
-                    r.json()
-                    .get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
-                )
-        except Exception:
-            pass
-        return None
-
-    def _call_huggingface(
-        self, prompt: str, system_prompt: Optional[str], timeout: int
-    ) -> Optional[str]:
-        """HuggingFace Inference Router API"""
-        key = self._keys.get("huggingface")
-        if not key:
-            return None
-        model = self._models.get("huggingface", CONFIG["huggingface"]["model_default"])
-        url = f"https://router.huggingface.co/models/{model}"
-
-        # HuggingFace 使用不同的请求格式
-        full_prompt = ""
-        if system_prompt:
-            full_prompt = f"{system_prompt}\n\n"
-        full_prompt += prompt
-
-        try:
-            r = requests.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "inputs": full_prompt,
-                    "parameters": {
-                        "max_new_tokens": 512,
-                        "temperature": 0.3,
-                    }
-                },
-                timeout=timeout,
-            )
-            if r.status_code == 200:
-                data = r.json()
-                # HuggingFace 返回格式：[{"generated_text": "..."}]
-                if isinstance(data, list) and len(data) > 0:
-                    text = data[0].get("generated_text", "")
-                    # 移除输入提示部分，只返回生成的部分
-                    if text.startswith(full_prompt):
-                        text = text[len(full_prompt):].strip()
-                    return text
-                return ""
-        except Exception:
-            pass
         return None
 
     def _call_ollama(

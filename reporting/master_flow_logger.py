@@ -8,11 +8,13 @@ REISHI 霊視 v5.0 - 完整運行日誌記錄系統
 4. 生成結構化的 step 報告
 """
 
-import os
 import json
+import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class MasterFlowLogger:
@@ -96,7 +98,7 @@ class MasterFlowLogger:
                 f"**輸入數據**:\n```json\n{json.dumps(input_data, ensure_ascii=False, indent=2)}\n```\n"
             )
 
-        print(f"[LOG] Step {step_index} [{step_name}] 開始")
+        logger.info(f"Step {step_index} [{step_name}] 開始")
 
     def log_step_end(
         self,
@@ -131,7 +133,7 @@ class MasterFlowLogger:
         if duration_sec:
             self._append_master_log(f"**耗時**: {duration_sec:.2f}s\n\n")
 
-        print(f"[LOG] Step {step_index} [{step_name}] 完成 ({duration_sec:.2f}s)" if duration_sec else f"[LOG] Step {step_index} [{step_name}] 完成")
+        logger.info(f"Step {step_index} [{step_name}] 完成 ({duration_sec:.2f}s)" if duration_sec else f"Step {step_index} [{step_name}] 完成")
 
     def log_llm_call(
         self,
@@ -159,8 +161,8 @@ class MasterFlowLogger:
             "provider": provider,
             "model": model,
             "system_prompt": system_prompt,
-            "user_prompt": user_prompt[:1000],  # 截斷長提示
-            "raw_response": raw_response[:1000],  # 截斷長回應
+            "user_prompt": user_prompt[:3000],  # 完整提示（截斷 3000）
+            "raw_response": raw_response[:3000],  # 完整回應（截斷 3000）
             "parsed_result": parsed_result,
             "tokens_used": tokens_used,
         }
@@ -182,25 +184,25 @@ class MasterFlowLogger:
 
         self._append_master_log("**System Prompt**:\n```\n")
         if system_prompt:
-            self._append_master_log(system_prompt[:300])
+            self._append_master_log(system_prompt[:1000])
         else:
             self._append_master_log("(無)")
         self._append_master_log("\n```\n\n")
 
-        self._append_master_log("**User Prompt**:\n```\n")
-        self._append_master_log(user_prompt[:500])
+        self._append_master_log("**User Prompt（送入 LLM 的完整問題）**:\n```\n")
+        self._append_master_log(user_prompt[:2000])
         self._append_master_log("\n```\n\n")
 
-        self._append_master_log("**LLM Response**:\n```\n")
-        self._append_master_log(raw_response[:500])
+        self._append_master_log("**LLM 回應（完整思考與判斷）**:\n```\n")
+        self._append_master_log(raw_response[:2000])
         self._append_master_log("\n```\n\n")
 
         if parsed_result:
-            self._append_master_log("**解析結果**:\n```json\n")
-            self._append_master_log(json.dumps(parsed_result, ensure_ascii=False, indent=2)[:500])
+            self._append_master_log("**解析後結構化結果**:\n```json\n")
+            self._append_master_log(json.dumps(parsed_result, ensure_ascii=False, indent=2)[:1000])
             self._append_master_log("\n```\n\n")
 
-        print(f"[LOG] LLM call: {agent_role} ({ticker or 'N/A'}) → {provider}")
+        logger.info(f"LLM call: {agent_role} ({ticker or 'N/A'}) → {provider}")
 
     def log_data_flow(
         self,
@@ -230,7 +232,7 @@ class MasterFlowLogger:
             if sample_data:
                 f.write(f"**樣本**: {str(sample_data)[:200]}\n\n")
 
-        print(f"[LOG] Data flow: {source_step} → {target_step}")
+        logger.info(f"Data flow: {source_step} → {target_step}")
 
     def write_step_detail_report(
         self,
@@ -256,21 +258,63 @@ class MasterFlowLogger:
             f.write("---\n\n")
             f.write(content)
 
-        print(f"[LOG] 步驟報告已寫入: {filename}")
+        logger.info(f"步驟報告已寫入: {filename}")
         return str(filepath)
 
     def finalize(self):
         """完成日誌並生成摘要"""
-        # 補充 LLM 思考過程章節
-        self._append_master_log("\n---\n\n## LLM 思考過程\n\n")
-        self._append_master_log(f"共 {len(self.llm_calls)} 個 LLM 呼叫:\n\n")
-        for i, call in enumerate(self.llm_calls, 1):
-            self._append_master_log(
-                f"{i}. **{call['agent_role']}** ({call['step_name']}, {call.get('ticker', 'N/A')})\n"
-                f"   - 提供商: {call.get('provider', '未知')}\n"
-                f"   - 模型: {call.get('model', '未知')}\n"
-                f"   - 時間: {call['timestamp']}\n\n"
-            )
+        # 補充 LLM 思考過程章節（按步驟分組）
+        self._append_master_log("\n---\n\n## LLM 思考過程總覽\n\n")
+        self._append_master_log(f"**共 {len(self.llm_calls)} 個 LLM 呼叫**\n\n")
+
+        # 按步驟分組
+        calls_by_step = {}
+        for call in self.llm_calls:
+            step_key = f"Step {call.get('step_index', '?')}: {call.get('step_name', '未知')}"
+            if step_key not in calls_by_step:
+                calls_by_step[step_key] = []
+            calls_by_step[step_key].append(call)
+
+        for step_key, calls in calls_by_step.items():
+            self._append_master_log(f"### {step_key} ({len(calls)} 次呼叫)\n\n")
+
+            # 按 ticker 分組（如果有的話）
+            tickers_seen = {}
+            for call in calls:
+                ticker = call.get('ticker', 'N/A')
+                if ticker not in tickers_seen:
+                    tickers_seen[ticker] = []
+                tickers_seen[ticker].append(call)
+
+            # 如果 ticker 很多，只顯示摘要表格
+            if len(tickers_seen) > 10:
+                self._append_master_log(f"| # | Ticker | Agent | Provider | 回應摘要 |\n")
+                self._append_master_log(f"|---|--------|-------|----------|----------|\n")
+                for idx, (ticker, t_calls) in enumerate(list(tickers_seen.items())[:30], 1):
+                    for tc in t_calls:
+                        resp_short = (tc.get('raw_response', '') or '')[:80].replace('\n', ' ').replace('|', '/')
+                        self._append_master_log(
+                            f"| {idx} | {ticker} | {tc.get('agent_role', '?')} | "
+                            f"{tc.get('provider', '?')} | {resp_short} |\n"
+                        )
+                if len(tickers_seen) > 30:
+                    self._append_master_log(f"\n... 還有 {len(tickers_seen) - 30} 個 ticker（詳見 01_LLM_CALLS.jsonl）\n")
+                self._append_master_log("\n")
+            else:
+                # 少量呼叫：顯示完整思考過程
+                for i, call in enumerate(calls, 1):
+                    ticker_label = f" [{call.get('ticker', '')}]" if call.get('ticker') else ""
+                    self._append_master_log(
+                        f"**{i}. {call['agent_role']}{ticker_label}** "
+                        f"(provider: {call.get('provider', '未知')}, model: {call.get('model', '未知')})\n\n"
+                    )
+                    # 顯示 prompt 摘要
+                    prompt_preview = (call.get('user_prompt', '') or '')[:300].replace('\n', '\n> ')
+                    self._append_master_log(f"> **問**: {prompt_preview}\n\n")
+                    # 顯示完整回應
+                    response_preview = (call.get('raw_response', '') or '')[:500].replace('\n', '\n> ')
+                    self._append_master_log(f"> **答**: {response_preview}\n\n")
+                self._append_master_log("\n")
 
         # 補充步驟詳情章節
         self._append_master_log("\n---\n\n## 步驟詳情\n\n")
@@ -291,7 +335,7 @@ class MasterFlowLogger:
                     f"- **[{ts}]** 🔴 Step {event['step_index']} 完成{duration}\n"
                 )
 
-        print(f"\n✅ 完整日誌已生成: {self.master_log}")
+        logger.info(f"完整日誌已生成: {self.master_log}")
 
     def _append_master_log(self, content: str):
         """追加內容到 master log"""

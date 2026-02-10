@@ -149,6 +149,8 @@ class SentimentAnalyzer:
                 system_prompt=_SYSTEM_SENTIMENT,
                 provider_hint="mistral",
                 timeout=60,
+                step_index=5, step_name="情緒分析",
+                agent_role="Sentiment Analyzer", ticker=ticker,
             )
             parsed = _parse_llm_sentiment(response, ticker)
             if parsed:
@@ -174,5 +176,5 @@ class SentimentAnalyzer:
             result[ticker] = self.analyze_news(ticker, news_list)
         with_news = sum(1 for t in tickers if (news_by_ticker.get(t) or []))
         preview = [(t, getattr(result.get(t), "score", 0.5)) for t in tickers[:5]]
-        print(f"[REISHI] [情緒] 完成 檔數={total} 有新聞={with_news}，前5檔 score={preview}")
+        logger.info(f"[情緒] 完成 檔數={total} 有新聞={with_news}，前5檔 score={preview}")
         return result

@@ -148,12 +148,17 @@ class MultiAgentAnalysis:
                 pass
         return self._llm
 
-    def _call_agent(self, prompt: str, system: str, provider_hint: str) -> Optional[str]:
+    def _call_agent(self, prompt: str, system: str, provider_hint: str,
+                     agent_role: str = "unknown", ticker: str = None) -> Optional[str]:
         llm = self._get_llm()
         if not llm or not llm.has_any_key():
             return None
         try:
-            text, _ = llm.call(prompt, system_prompt=system, provider_hint=provider_hint, timeout=90)
+            text, _ = llm.call(
+                prompt, system_prompt=system, provider_hint=provider_hint, timeout=90,
+                step_index=6, step_name="Multi-Agent 協作分析",
+                agent_role=agent_role, ticker=ticker,
+            )
             return text
         except Exception as e:
             logger.warning("multi_agent LLM %s: %s", provider_hint, e)
@@ -174,7 +179,7 @@ class MultiAgentAnalysis:
         if fundamental is not None and getattr(fundamental, "summary_text", None):
             sys_f = "你是基本面分析師。根據提供的財務摘要，給出 BUY/HOLD/SELL、1-10 分、信心度、key_points、risks、reasoning。輸出單一 JSON，欄位: action, score (數字1-10), confidence (數字0-1，例如0.7), key_points (字串陣列), risks (字串陣列), reasoning (字串)。"
             prompt_f = f"股票 {ticker} 基本面摘要：\n{getattr(fundamental, 'summary_text', '')}\n\n請輸出 JSON，格式範例：{{\"action\":\"HOLD\",\"score\":6,\"confidence\":0.65,\"key_points\":[\"...\"],\"risks\":[\"...\"],\"reasoning\":\"...\"}}"
-            raw_f = self._call_agent(prompt_f, sys_f, "scitely")
+            raw_f = self._call_agent(prompt_f, sys_f, "scitely", agent_role="Fundamental Agent", ticker=ticker)
             a_f = _parse_agent_response(raw_f, "Fundamental", ticker) if raw_f else None
             individual["Fundamental"] = a_f or _placeholder_analysis("Fundamental", ticker, "LLM 未回傳")
         else:
@@ -192,7 +197,7 @@ class MultiAgentAnalysis:
                 pass
         sys_t = "你是技術分析師。根據價格與技術指標，給出 BUY/HOLD/SELL、1-10 分、信心度、key_points、risks、reasoning。輸出單一 JSON，欄位: action, score (數字1-10), confidence (數字0-1，例如0.7), key_points (字串陣列), risks (字串陣列), reasoning (字串)。"
         prompt_t = f"股票 {ticker} 技術描述：{tech_desc}\n\n請輸出 JSON，格式範例：{{\"action\":\"HOLD\",\"score\":6,\"confidence\":0.65,\"key_points\":[\"...\"],\"risks\":[\"...\"],\"reasoning\":\"...\"}}"
-        raw_t = self._call_agent(prompt_t, sys_t, "cohere")
+        raw_t = self._call_agent(prompt_t, sys_t, "cohere", agent_role="Technical Agent", ticker=ticker)
         a_t = _parse_agent_response(raw_t, "Technical", ticker) if raw_t else None
         individual["Technical"] = a_t or _placeholder_analysis("Technical", ticker, tech_desc)
 
@@ -203,7 +208,7 @@ class MultiAgentAnalysis:
             risks_s = getattr(sentiment, "risks", []) or []
             score_s = getattr(sentiment, "score", 0.5)
             prompt_s = f"股票 {ticker} 市場情緒：score={score_s}，key_factors={factors}，risks={risks_s}\n\n請輸出 JSON，格式範例：{{\"action\":\"HOLD\",\"score\":6,\"confidence\":0.65,\"key_points\":[\"...\"],\"risks\":[\"...\"],\"reasoning\":\"...\"}}"
-            raw_s = self._call_agent(prompt_s, sys_s, "openrouter")
+            raw_s = self._call_agent(prompt_s, sys_s, "openrouter", agent_role="Sentiment Agent", ticker=ticker)
             a_s = _parse_agent_response(raw_s, "Sentiment", ticker) if raw_s else None
             individual["Sentiment"] = a_s or _placeholder_analysis("Sentiment", ticker, "LLM 未回傳")
         else:
@@ -225,7 +230,7 @@ class MultiAgentAnalysis:
         risk_desc = "; ".join(risk_factors) if risk_factors else "無風險數據"
         sys_r = "你是風險分析師。專注於識別下行風險、市場風險、公司特定風險。給出 BUY/HOLD/SELL、1-10 分（低分=高風險）、信心度、key_points、risks、reasoning。輸出單一 JSON，欄位: action, score (數字1-10), confidence (數字0-1，例如0.7), key_points (字串陣列), risks (字串陣列), reasoning (字串)。"
         prompt_r = f"股票 {ticker} 風險評估：{risk_desc}\n\n請輸出風險分析 JSON，格式範例：{{\"action\":\"HOLD\",\"score\":6,\"confidence\":0.65,\"key_points\":[\"...\"],\"risks\":[\"...\"],\"reasoning\":\"...\"}}"
-        raw_r = self._call_agent(prompt_r, sys_r, "mistral")
+        raw_r = self._call_agent(prompt_r, sys_r, "mistral", agent_role="Risk Agent", ticker=ticker)
         a_r = _parse_agent_response(raw_r, "Risk", ticker) if raw_r else None
         individual["Risk"] = a_r or _placeholder_analysis("Risk", ticker, risk_desc)
 
@@ -236,7 +241,7 @@ class MultiAgentAnalysis:
         consensus_text = "\n".join(lines)
         sys_c = "你是最終協調者。根據四位分析師（基本面、技術面、情緒、風險）的結論，整合出共識決策。JSON 欄位: consensus_action (BUY/HOLD/SELL), consensus_score (1-10), disagreements (字串陣列), final_recommendation (一句話建議)。"
         prompt_c = f"股票 {ticker} 四位分析師結論：\n{consensus_text}\n\n請輸出共識 JSON。"
-        raw_c = self._call_agent(prompt_c, sys_c, "scitely")
+        raw_c = self._call_agent(prompt_c, sys_c, "scitely", agent_role="Consensus Coordinator", ticker=ticker)
         parsed = _parse_consensus_response(raw_c, ticker) if raw_c else None
         if parsed:
             action, score, disagreements, rec = parsed
@@ -271,7 +276,7 @@ class MultiAgentAnalysis:
         by_ticker: Dict[str, MultiAgentResult] = {}
         tickers_done = []
         if total > 0:
-            print(f"[REISHI] [Multi-Agent] 開始分析 {total} 檔（每檔 5 次 LLM：Fundamental/Technical/Sentiment/Risk + Consensus），每 20 檔顯示擇要…", flush=True)
+            logger.info(f"[Multi-Agent] 開始分析 {total} 檔（每檔 5 次 LLM：Fundamental/Technical/Sentiment/Risk + Consensus）")
         for idx, c in enumerate(cand_list):
             ticker = getattr(c, "ticker", None)
             if not ticker:
@@ -288,8 +293,58 @@ class MultiAgentAnalysis:
             # 每 20 檔在終端印一則擇要，避免刷屏又讓用戶看到進度
             if i % 20 == 0 or i == total:
                 rec_short = (result.final_recommendation or "")[:55].replace("\n", " ")
-                print(f"    [{i}/{total}] {ticker}: {result.consensus_action} — {rec_short}{'…' if len(result.final_recommendation or '') > 55 else ''}", flush=True)
+                logger.info(f"[Multi-Agent] [{i}/{total}] {ticker}: {result.consensus_action} — {rec_short}")
         summary_parts = [f"{t}: {by_ticker[t].consensus_action} ({by_ticker[t].final_recommendation[:50]}...)" for t in tickers_done[:5]]
         summary = "Multi-Agent 分析完成。\n" + "\n".join(summary_parts) if summary_parts else "Multi-Agent 分析完成（無候選）。"
-        print(f"[REISHI] [Multi-Agent] 完成 候選數={len(by_ticker)}，前5檔共識={[f'{t}: {by_ticker[t].consensus_action}' for t in tickers_done[:5]]}", flush=True)
+        logger.info(f"[Multi-Agent] 完成 候選數={len(by_ticker)}，前5檔共識={[f'{t}: {by_ticker[t].consensus_action}' for t in tickers_done[:5]]}")
+
+        # 寫入 Multi-Agent 步驟詳細報告
+        self._write_step_detail(by_ticker, tickers_done)
+
         return {"by_ticker": by_ticker, "summary": summary}
+
+    def _write_step_detail(self, by_ticker: Dict[str, "MultiAgentResult"], tickers_done: list):
+        """寫入 Multi-Agent 步驟的詳細報告，讓用戶能看到每個 agent 的判斷"""
+        try:
+            from core.llm_clients import get_master_flow_logger
+            flow_logger = get_master_flow_logger()
+            if not flow_logger:
+                return
+
+            lines = []
+            lines.append(f"## Multi-Agent 協作分析詳細報告\n")
+            lines.append(f"**分析標的數**: {len(by_ticker)}\n")
+            lines.append(f"**每檔分析角色**: Fundamental / Technical / Sentiment / Risk + Consensus\n\n")
+
+            for ticker in tickers_done:
+                result = by_ticker.get(ticker)
+                if not result:
+                    continue
+                lines.append(f"### {ticker}\n")
+                lines.append(f"**共識決策**: {result.consensus_action} (分數: {result.consensus_score:.1f})")
+                lines.append(f"**最終建議**: {result.final_recommendation}\n")
+                if result.disagreements:
+                    lines.append(f"**分歧**: {result.disagreements}\n")
+
+                lines.append("| Agent | 行動 | 分數 | 信心度 | 推理 |")
+                lines.append("|-------|------|------|--------|------|")
+                for name, ana in result.individual_analyses.items():
+                    reasoning_short = (ana.reasoning or "")[:100].replace("\n", " ")
+                    lines.append(f"| {name} | {ana.action} | {ana.score:.1f} | {ana.confidence:.2f} | {reasoning_short} |")
+                lines.append("")
+
+                # 顯示每個 agent 的重點和風險
+                for name, ana in result.individual_analyses.items():
+                    if ana.key_points and ana.key_points != ["（未解析）"]:
+                        lines.append(f"**{name} 重點**: {ana.key_points}")
+                    if ana.risks:
+                        lines.append(f"**{name} 風險**: {ana.risks}")
+                lines.append("\n---\n")
+
+            flow_logger.write_step_detail_report(
+                step_index=6,
+                step_name="Multi-Agent 協作分析",
+                content="\n".join(lines),
+            )
+        except Exception as e:
+            logger.warning(f"[Multi-Agent] 寫入步驟報告失敗: {e}")

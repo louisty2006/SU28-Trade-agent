@@ -22,16 +22,6 @@ _env_dir = os.path.dirname(os.path.abspath(__file__))
 _DEBUG_LOG_PATH = os.path.join(_env_dir, ".cursor", "debug.log")
 _DEBUG_LOG_FALLBACK = os.path.join(_env_dir, "debug_run.log")
 
-def _debug_log(payload):
-    """寫入兩處 log，方便在專案根目錄用 tail/grep 查看。"""
-    for _path in (_DEBUG_LOG_PATH, _DEBUG_LOG_FALLBACK):
-        try:
-            os.makedirs(os.path.dirname(_path), exist_ok=True)
-            with open(_path, "a", encoding="utf-8") as _f:
-                _f.write(__import__("json").dumps(payload, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-
 _interactive_run_id = None
 
 def _run_summary(line: str, run_id: str = None):
@@ -291,6 +281,30 @@ class ReishiV5:
                 },
                 duration_sec=step3_duration
             )
+
+            # 寫入圖表型態步驟詳細報告
+            if pattern_analysis:
+                _pat_lines = [f"## 圖表型態識別結果\n\n**候選數**: {len(pattern_analysis)}\n"]
+                _pat_lines.append("| # | Ticker | 型態 | 分數 | 現價 | 進場區間 | 止損 | 目標 | 理由 |")
+                _pat_lines.append("|---|--------|------|------|------|----------|------|------|------|")
+                for _pi, _pc in enumerate(pattern_analysis[:50], 1):  # 最多顯示 50 筆
+                    _t = getattr(_pc, 'ticker', '?')
+                    _typ = getattr(_pc, 'pattern_type', '?')
+                    _sc = getattr(_pc, 'score', 0)
+                    _cur = getattr(_pc, 'current_price', None)
+                    _el = getattr(_pc, 'entry_price_low', None)
+                    _eh = getattr(_pc, 'entry_price_high', None)
+                    _sl = getattr(_pc, 'stop_loss', None)
+                    _tp = getattr(_pc, 'target_price', None)
+                    _rs = (getattr(_pc, 'reasoning', '') or '')[:60]
+                    _pat_lines.append(
+                        f"| {_pi} | {_t} | {_typ} | {_sc:.2f} | "
+                        f"{'$'+f'{_cur:.2f}' if _cur else 'N/A'} | "
+                        f"{'$'+f'{_el:.2f}'+'-$'+f'{_eh:.2f}' if _el and _eh else 'N/A'} | "
+                        f"{'$'+f'{_sl:.2f}' if _sl else 'N/A'} | "
+                        f"{'$'+f'{_tp:.2f}' if _tp else 'N/A'} | {_rs} |"
+                    )
+                master_flow_logger.write_step_detail_report(3, "圖表型態識別", "\n".join(_pat_lines))
             # 4. 因果推理（數據源：即時新聞 Finnhub、持倉本地）
             print("\n[4/9] 因果推理...")
             print("[REISHI] [步驟4] 判斷基準：Finnhub 新聞 + 持倉；LLM 因果鏈（四角）。")
@@ -402,6 +416,27 @@ class ReishiV5:
                 },
                 duration_sec=step8_duration
             )
+
+            # 寫入決策引擎步驟詳細報告
+            _dec_lines = [f"## 決策引擎結果\n"]
+            _dec_lines.append(f"**總決策數**: {len(acts)}")
+            _dec_lines.append(f"**整體評估**: {getattr(decision, 'overall_assessment', 'N/A')}")
+            _dec_lines.append(f"**風險警告**: {getattr(decision, 'risk_warnings', [])}\n")
+            if acts:
+                _dec_lines.append("### 交易行動\n")
+                for _ai, _act in enumerate(acts, 1):
+                    _dec_lines.append(f"#### {_ai}. {getattr(_act, 'action', '?')} {getattr(_act, 'ticker', '?')}")
+                    _dec_lines.append(f"- **進場區間**: ${getattr(_act, 'entry_price_low', 'N/A')} - ${getattr(_act, 'entry_price_high', 'N/A')}")
+                    _dec_lines.append(f"- **止損**: ${getattr(_act, 'stop_loss', 'N/A')}")
+                    _dec_lines.append(f"- **目標**: ${getattr(_act, 'target_price', 'N/A')}")
+                    _dec_lines.append(f"- **倉位大小**: {getattr(_act, 'position_size_pct', 'N/A')}%")
+                    _dec_lines.append(f"- **信心度**: {getattr(_act, 'confidence', 'N/A')}")
+                    _dec_lines.append(f"- **推理**: {getattr(_act, 'reasoning', 'N/A')}")
+                    _dec_lines.append(f"- **風險**: {getattr(_act, 'risks', [])}\n")
+            else:
+                _dec_lines.append("### 無交易行動\n")
+                _dec_lines.append(f"原因: {getattr(decision, 'overall_assessment', '未說明')}")
+            master_flow_logger.write_step_detail_report(8, "決策引擎", "\n".join(_dec_lines))
             # 9. 验证 + 审计
             print("\n[9/9] 最终验证与审计...")
             print("[REISHI] [步驟9] 判斷基準：output_validator 邏輯/數字檢查；final_auditor 審計（只檢查不判斷）。")
@@ -471,14 +506,6 @@ class ReishiV5:
         flow_logger: 可選 FlowLogger。step_log(msg): 可選，每步寫入步驟日誌檔。
         day_index/total_days/day_start_ts/est_per_day_sec: 供進度顯示整體剩餘時間用。
         """
-        # #region agent log
-        try:
-            import json, time
-            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                _dbg.write(json.dumps({"hypothesisId": "H5", "location": "main_v5.py:236", "message": "run_daily_for_backtest_entry", "data": {"stock_count": stock_count, "as_of_date": str(as_of_date)}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
         from datetime import timedelta
         from reporting.step_report import write_step_report
         total_steps = 7
@@ -491,15 +518,6 @@ class ReishiV5:
             if callable(on_step_activity):
                 on_step_activity(step_i, msg)
         def _on_ticker_wrap(t, i, n):
-            # #region agent log
-            if i == 1:
-                try:
-                    import json
-                    with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                        _dbg.write(json.dumps({"hypothesisId": "H2", "message": "on_ticker_wrap_first", "data": {"ticker": str(t), "has_flow_logger": flow_logger is not None, "has_on_ticker": callable(on_ticker)}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
-                except Exception:
-                    pass
-            # #endregion
             if flow_logger:
                 flow_logger.log_layer1_fetch(t, i, n)
             if callable(on_ticker):
@@ -517,14 +535,6 @@ class ReishiV5:
         start_str = start_d.strftime("%Y-%m-%d") if start_d and hasattr(start_d, "strftime") else None
         tickers_to_fetch = self._get_scan_tickers(cap=stock_count)
         _step(f"取得掃描列表 共 {len(tickers_to_fetch)} 檔")
-        # #region agent log
-        try:
-            import json, time
-            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                _dbg.write(json.dumps({"hypothesisId": "H1", "location": "main_v5.py:286", "message": "tickers_to_fetch_after_get_scan_tickers", "data": {"stock_count_param": stock_count, "tickers_count": len(tickers_to_fetch), "first_10_tickers": tickers_to_fetch[:10]}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
         # 即時新聞：Finnhub（回測時用 as_of_date 區間，不偷看未來）
         from utils.news_fetcher import fetch_news_for_tickers, to_news_objects
         to_date_news = end_str
@@ -545,14 +555,6 @@ class ReishiV5:
         if flow_logger:
             # 輸入層：你的狀態 → 市場數據 → 即時新聞 → 霊視記憶（標明數據源）
             your_state = f"現金 {self.portfolio.cash:,.0f}、持倉 {len(self.portfolio.positions)} 檔、總值 {self.portfolio.total_value:,.0f}"
-            # #region agent log
-            try:
-                import json, time
-                with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                    _dbg.write(json.dumps({"hypothesisId": "H4", "location": "main_v5.py:313", "message": "flow_logger_market_data_desc", "data": {"tickers_to_fetch_count": len(tickers_to_fetch), "first_10": tickers_to_fetch[:10]}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-            # #endregion
             market_data_desc = f"掃描標的 {len(tickers_to_fetch)} 檔（{', '.join(tickers_to_fetch[:8])}{' ...' if len(tickers_to_fetch) > 8 else ''}）；數據源：Yahoo (DataFetcher) / yfinance"
             try:
                 mem_stats = self.memory.get_statistics()
@@ -567,14 +569,6 @@ class ReishiV5:
             print("[REISHI] [回測步驟1] 判斷基準：K 線僅到 as_of_date；Yahoo/多數據源。")
         _prog(1, "取數", 0)
         _activity(1, "開始從數據源拉取歷史 K 線…")
-        # #region agent log
-        try:
-            import json
-            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                _dbg.write(json.dumps({"hypothesisId": "H1", "message": "before_log_layer1_start", "data": {"end_str": str(end_str)}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
         if flow_logger:
             flow_logger.log_layer1_start("本地 parquet" if pre_fetched_market_data else "Yahoo (DataFetcher) / yfinance（依環境）")
         _step(f"步驟1 數據獲取 開始 {len(tickers_to_fetch)} 檔")
@@ -586,22 +580,6 @@ class ReishiV5:
         _step(f"步驟1 數據獲取 完成 有效 {len(market_data)} 檔 來源 {data_source}")
         if not silent:
             print(f"[REISHI] 擇要：有效 ticker 數={len(market_data)}，來源={data_source}，前5={list(market_data.keys())[:5]}")
-        # #region agent log
-        try:
-            import json
-            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                _dbg.write(json.dumps({"hypothesisId": "H1", "message": "after_fetch_before_layer1_result", "data": {"n_market": len(market_data)}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
-        # #region agent log
-        try:
-            import json
-            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                _dbg.write(json.dumps({"hypothesisId": "H4", "message": "market_data_result", "data": {"n_valid": len(market_data), "valid_tickers": list(market_data.keys())[:5], "requested": len(tickers_to_fetch)}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
         if flow_logger:
             flow_logger.log_layer1_result(len(market_data), list(market_data.keys()), data_source=data_source)
         _activity(1, f"取數完成，共 {len(market_data)} 檔有效數據")
@@ -637,28 +615,6 @@ class ReishiV5:
             tickers, market_data,
             on_ticker=lambda t, i, n: (flow_logger.log_ai_2_fetch(t, i, n) if flow_logger else None, _activity(2, f"正在掃描 {t} ({i}/{n}) …") if callable(on_step_activity) else None)
         )
-        # #region agent log
-        try:
-            import json
-            _n_pattern = len(pattern_analysis) if pattern_analysis else 0
-            _pattern_tickers = [getattr(c, "ticker", "") for c in (pattern_analysis or [])][:5]
-            _pattern_details = []
-            for c in (pattern_analysis or [])[:3]:
-                _pattern_details.append({
-                    "ticker": getattr(c, 'ticker', '?'),
-                    "type": getattr(c, 'pattern_type', '?'),
-                    "current_price": getattr(c, 'current_price', None),
-                    "entry_low": getattr(c, 'entry_price_low', None),
-                    "entry_high": getattr(c, 'entry_price_high', None),
-                    "stop_loss": getattr(c, 'stop_loss', None),
-                    "target_price": getattr(c, 'target_price', None),
-                    "reasoning": (getattr(c, 'reasoning', '') or '')[:50]
-                })
-            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                _dbg.write(json.dumps({"hypothesisId": "H5", "message": "pattern_analysis_result", "data": {"n_candidates": _n_pattern, "candidate_tickers": _pattern_tickers, "pattern_details": _pattern_details}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
         if flow_logger:
             flow_logger.log_ai_2_result(len(pattern_analysis), [getattr(c, "ticker", "") for c in pattern_analysis] if pattern_analysis else None)
         _step(f"步驟2 圖表型態識別 完成 候選 {len(pattern_analysis)} 檔")
@@ -838,14 +794,6 @@ class ReishiV5:
     
     def _get_scan_tickers(self, cap: int = 9000):
         """取得要掃描的股票列表。cap 為數量上限（預設 9000，接近全美股）。"""
-        # #region agent log
-        try:
-            import json, time
-            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                _dbg.write(json.dumps({"hypothesisId": "H1", "location": "main_v5.py:530", "message": "_get_scan_tickers_entry", "data": {"cap": cap}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
         import yaml
         tickers = []
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -890,23 +838,7 @@ class ReishiV5:
                         sym = (row.get("symbol") or row.get("Symbol") or "").strip()
                         if sym:
                             tickers.append(sym)
-                # #region agent log
-                try:
-                    import json, time
-                    with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                        _dbg.write(json.dumps({"hypothesisId": "H1", "location": "main_v5.py:545", "message": "us_universe_loaded", "data": {"us_path": us_path, "tickers_loaded": len(tickers), "first_10": tickers[:10]}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}, ensure_ascii=False) + "\n")
-                except Exception:
-                    pass
-                # #endregion
             except Exception as e:
-                # #region agent log
-                try:
-                    import json, time
-                    with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                        _dbg.write(json.dumps({"hypothesisId": "H1", "location": "main_v5.py:546", "message": "us_universe_load_failed", "data": {"error": str(e)}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}, ensure_ascii=False) + "\n")
-                except Exception:
-                    pass
-                # #endregion
                 pass
         # 若 us_universe 不足，從 config.yaml 補
         if len(tickers) < cap and os.path.isfile("config.yaml"):
@@ -958,27 +890,11 @@ class ReishiV5:
             _yf_log.setLevel(_yf_prev_level)
 
     def _fetch_and_validate_data_impl(self, end_date=None, start_date=None, cap: int = 9000, silent: bool = False, on_ticker=None, on_fetch_progress=None):
-        # #region agent log
-        try:
-            import json, time
-            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                _dbg.write(json.dumps({"hypothesisId": "H3", "location": "main_v5.py:604", "message": "_fetch_and_validate_data_entry", "data": {"cap": cap}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
         tickers = self._get_scan_tickers(cap=cap)
         market_data = {}
         data_source = "yfinance"
         end_str = end_date.strftime("%Y-%m-%d") if hasattr(end_date, "strftime") else end_date
         start_str = start_date.strftime("%Y-%m-%d") if start_date and hasattr(start_date, "strftime") else start_date
-        # #region agent log
-        try:
-            import json
-            with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                _dbg.write(json.dumps({"hypothesisId": "H4", "message": "fetch_params", "data": {"end_str": end_str, "start_str": start_str, "n_tickers": len(tickers), "tickers_sample": tickers[:3]}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
         n_tickers = len(tickers)
         if not silent and n_tickers > 100:
             _progress_every = max(50, min(500, n_tickers // 10))
@@ -1018,7 +934,6 @@ class ReishiV5:
                 raise
             finally:
                 executor.shutdown(wait=True)
-            _first_done = False
             _used_multi_fallback = False
             from datetime import datetime as _dt, timedelta as _td
             _end_d = _dt.strptime(end_str, "%Y-%m-%d").date() if end_str else None
@@ -1027,15 +942,6 @@ class ReishiV5:
                 if callable(on_ticker):
                     on_ticker(ticker, idx + 1, n_tickers)
                 _df, _err = _results.get(ticker, (None, None))
-                if not _first_done:
-                    try:
-                        import json
-                        _df_len = len(_df) if _df is not None and not (_df.empty if hasattr(_df, 'empty') else True) else 0
-                        with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                            _dbg.write(json.dumps({"hypothesisId": "H4", "message": "first_ticker_fetch_result", "data": {"ticker": ticker, "df_is_none": _df is None, "df_len": _df_len, "end_str": end_str, "start_str": start_str}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
-                    except Exception:
-                        pass
-                    _first_done = True
                 if _err is not None:
                     if not silent and n_tickers <= 100:
                         print(f"   ⚠ {ticker}: {_err}")
@@ -1235,15 +1141,6 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, stock_count: int 
             prev_d = prev_trading_day(T)
             # Always use 90-day lookback window from prev_d (never collapse to start_d)
             backtest_start_eff = prev_d - timedelta(days=90)
-            # #region agent log
-            if i == 0:
-                try:
-                    import json
-                    with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                        _dbg.write(json.dumps({"hypothesisId": "H4", "message": "first_day_dates", "data": {"T": T.strftime("%Y-%m-%d"), "prev_d": prev_d.strftime("%Y-%m-%d"), "backtest_start_eff": backtest_start_eff.strftime("%Y-%m-%d") if hasattr(backtest_start_eff, "strftime") else str(backtest_start_eff)}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
-                except Exception:
-                    pass
-            # #endregion
             reishi.portfolio = PortfolioState(
                 cash=cash,
                 positions=positions,
@@ -1326,16 +1223,6 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, stock_count: int 
                     if t:
                         tickers_needed.append(t)
             execution_prices = get_execution_prices_for_date(tickers_needed or ["AAPL"], T)
-            # #region agent log
-            try:
-                import json
-                _n_exec = len(execution_prices)
-                _exec_sample = list(execution_prices.items())[:3]
-                with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
-                    _dbg.write(json.dumps({"hypothesisId": "H7", "message": "execution_prices_fetched", "data": {"date": T.strftime("%Y-%m-%d"), "n_prices": _n_exec, "tickers_needed": tickers_needed[:5], "exec_sample": _exec_sample}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-            # #endregion
             trades = []
             if decision:
                 cash, positions, trades = apply_v5_decision(
@@ -1486,10 +1373,6 @@ def main():
     print("  [3] 數據管理 — 下載／檢查歷史數據")
     print("  [0] 顯示命令列參數說明")
     choice = input("\n請輸入選項 [1/2/3/0]: ").strip()
-    # #region agent log
-    _debug_log({"location": "main_v5.py:menu", "message": "main_menu_choice", "data": {"choice": choice}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session", "hypothesisId": "H1", "runId": _interactive_run_id})
-    # #endregion
-
     if choice == "1":
         run_dir = _create_run_dir_v5()
         log_file, original_stdout = _start_log_v5(run_dir)
@@ -1515,9 +1398,6 @@ def main():
         print("  [A] 本地數據回測（推薦）— 使用預下載數據，速度快")
         print("  [B] 即時數據回測 — 每日即時拉取，限 1–7 天，用於驗證程式運行")
         sub = input("請選擇 [A/B]: ").strip().upper()
-        # #region agent log
-        _debug_log({"location": "main_v5.py:backtest_sub", "message": "backtest_sub_choice", "data": {"sub": sub, "valid": sub in ("A", "B")}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session", "hypothesisId": "H1", "runId": _interactive_run_id})
-        # #endregion
         if sub not in ("A", "B"):
             _run_summary(f"choice=2 sub=invalid value={sub!r}")
             print("❌ 請輸入 A 或 B")
@@ -1559,9 +1439,6 @@ def main():
                 print("❌ 結束日期必須晚於開始日期")
                 return
             sufficient, msg, relevant = check_data_sufficient(start_dt, end_dt)
-            # #region agent log
-            _debug_log({"location": "main_v5.py:check_sufficient", "message": "check_data_sufficient_result", "data": {"sufficient": sufficient, "msg": msg, "start_dt": str(start_dt), "end_dt": str(end_dt), "relevant_years": [r.year for r in relevant], "statuses": [r.status for r in relevant]}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session", "hypothesisId": "H2", "runId": _interactive_run_id})
-            # #endregion
             print(f"  {msg}")
             if not sufficient:
                 print("  [R] 修復後再回測  [P] 用現有數據繼續  [C] 換區間")
@@ -1592,9 +1469,6 @@ def main():
             backtest_run_dir = os.path.join("reports", "backtest_range", f"{start_dt.strftime('%Y-%m-%d')}_to_{end_dt.strftime('%Y-%m-%d')}")
             os.makedirs(backtest_run_dir, exist_ok=True)
             log_file_bt, original_stdout_bt = _start_log_v5(backtest_run_dir, log_name="REIKAN_run.log")
-            # #region agent log
-            _debug_log({"location": "main_v5.py:before_local_backtest", "message": "about_to_run_local_backtest", "data": {"start": start_dt.strftime("%Y-%m-%d"), "end": end_dt.strftime("%Y-%m-%d"), "stock_count": stock_count}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session", "hypothesisId": "H3", "runId": _interactive_run_id})
-            # #endregion
             _run_summary(f"choice=2 sub=A backtest_started start={start_dt} end={end_dt} stock_count={stock_count} local=true")
             try:
                 summary_path, trades_path = run_backtest_v5_full_range(
