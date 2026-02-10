@@ -33,10 +33,11 @@ def get_master_flow_logger():
     """取得全局 master flow logger"""
     return _master_flow_logger
 
-# 與 v4.3 stage3 完全一致的配置 + openrouter2 + routeway
+# 與 v4.3 stage3 完全一致的配置 + openrouter2 (雙帳號) + routeway
 PROVIDERS = (
     "mistral",
     "openrouter",
+    "openrouter2",  # 第二個 OpenRouter 帳號（Reishi02）
     "ollama",
 )
 
@@ -49,10 +50,17 @@ CONFIG = {
         "url": "https://api.mistral.ai/v1/chat/completions",
     },
     "openrouter": {
-        "name": "宏觀",
+        "name": "宏觀 (Reishi01)",
         "api_key_env": "OPENROUTER_API_KEY",
         "model_env": "OPENROUTER_MODEL",
         "model_default": "meta-llama/llama-3.2-3b-instruct:free",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+    },
+    "openrouter2": {
+        "name": "宏觀 (Reishi02)",
+        "api_key_env": "OPENROUTER_API_KEY_2",
+        "model_env": "OPENROUTER_MODEL_2",
+        "model_default": "meta-llama/llama-3.1-8b-instruct:free",
         "url": "https://openrouter.ai/api/v1/chat/completions",
     },
     "ollama": {
@@ -65,7 +73,7 @@ CONFIG = {
 }
 
 # 預設 fallback 順序（key 不足時依序嘗試）
-FALLBACK_ORDER: List[str] = ["mistral", "openrouter", "ollama"]
+FALLBACK_ORDER: List[str] = ["mistral", "openrouter", "openrouter2", "ollama"]
 
 
 class LLMClients:
