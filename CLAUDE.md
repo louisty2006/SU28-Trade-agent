@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **REISHI 霊視 v5.0** is an AI-powered stock scanner system for US and Hong Kong markets. It uses a **five-layer protection system** and **five major AI analysis directions** with an integrated decision engine to identify trading opportunities.
 
-**Current Version**: v5.3 (on branch `V5.3`)
+**Current Version**: v5.4 (on branch `v5.4`)
 **Main Entry Point**: `main_v5.py` (daily analysis, backtesting, monitoring)
 
 ---
@@ -330,7 +330,7 @@ stock_scanner/
 ## Git Workflow
 
 - **Main branch**: `main` (production, stable)
-- **Development branch**: `V5.3` (current development)
+- **Development branch**: `v5.4` (current development)
 - **Commit often**: Small, focused commits with clear messages
 - **No force push**: Preserve history for debugging
 - **Test before commit**: Run `--daily --quick` or unit tests if added

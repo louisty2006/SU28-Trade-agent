@@ -88,7 +88,7 @@ class ReishiV5:
     
     def __init__(self, config_path: str = "config.yaml"):
         print("=" * 70)
-        print("🔮 REISHI 霊視 v5.3")
+        print("🔮 REISHI 霊視 v5.4")
         print("=" * 70)
         print("初始化系统...")
         
@@ -139,7 +139,7 @@ class ReishiV5:
         """
         from reporting.flow_logger import FlowLogger
         print("\n" + "=" * 70)
-        print("🔮 REISHI 霊視 v5.3 - 每日分析")
+        print("🔮 REISHI 霊視 v5.4 - 每日分析")
         print("=" * 70)
         flow_logger = FlowLogger(flush_each=True)
         try:
@@ -1047,7 +1047,7 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, stock_count: int 
     else:
         est_str = f"約 {est_min:.0f} 分鐘"
     print("\n" + "=" * 70)
-    print(f"🔗 REISHI v5.3 回测（逐日 v5.0 流程）— 每日 {stock_count} 檔" + (" [本地數據]" if use_local_data else ""))
+    print(f"🔗 REISHI v5.4 回测（逐日 v5.0 流程）— 每日 {stock_count} 檔" + (" [本地數據]" if use_local_data else ""))
     print("=" * 70)
     print(f"📅 期間: {start_date} → {end_date}，共 {n_days} 個交易日")
     print(f"💰 初始資金: {config.initial_cash:,.0f} HKD")
@@ -1262,7 +1262,7 @@ def run_backtest_v5_full_range(start_date: str, end_date: str, stock_count: int 
 
 def main():
     """主程序入口"""
-    parser = argparse.ArgumentParser(description='REISHI 霊視 v5.3')
+    parser = argparse.ArgumentParser(description='REISHI 霊視 v5.4')
     parser.add_argument('--daily', action='store_true', help='运行每日分析')
     parser.add_argument('--monitor', action='store_true', help='启动即时监控')
     parser.add_argument('--stats', action='store_true', help='显示统计信息')
@@ -1554,7 +1554,7 @@ BANNER_V5 = """
   #   #  #       #     #  #    #   #    #   #   #        #   #               
   #   #  #####   ###   ####  #   #   ###   ####     ###   ####                
                                                                                 
-                          霊  視  ·  REISHI  5.3                               
+                          霊  視  ·  REISHI  5.4                               
                 ---  AI 市場洞察 · 五層防護 · 多智能體  ---                      
                                                                                 
 ================================================================================
