@@ -15,9 +15,23 @@ import os
 import requests
 import time
 import logging
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 
 logger = logging.getLogger(__name__)
+
+# 全局引用用於記錄 LLM 呼叫
+_master_flow_logger = None
+
+
+def set_master_flow_logger(logger_instance):
+    """設置全局 master flow logger（用於記錄 LLM 呼叫）"""
+    global _master_flow_logger
+    _master_flow_logger = logger_instance
+
+
+def get_master_flow_logger():
+    """取得全局 master flow logger"""
+    return _master_flow_logger
 
 # 與 v4.3 stage3 完全一致的配置 + openrouter2 + routeway
 PROVIDERS = (
@@ -82,16 +96,30 @@ class LLMClients:
         system_prompt: Optional[str] = None,
         provider_hint: Optional[str] = None,
         timeout: int = 120,
+        # 新增記錄參數
+        step_index: Optional[int] = None,
+        step_name: Optional[str] = None,
+        agent_role: Optional[str] = None,
+        ticker: Optional[str] = None,
     ) -> Tuple[str, Optional[str]]:
         """
         呼叫 LLM。優先使用 provider_hint；若該 key 不存在則依 FALLBACK_ORDER 用第一個有 key 的。
         回傳 (response_text, used_provider_id)。
+
+        記錄參數:
+        - step_index: 步驟編號
+        - step_name: 步驟名稱
+        - agent_role: 代理角色名稱
+        - ticker: 股票代碼（如適用）
         """
         order = (
             [provider_hint] + [p for p in FALLBACK_ORDER if p != provider_hint]
             if provider_hint
             else list(FALLBACK_ORDER)
         )
+        used_provider = None
+        response_text = None
+
         for pid in order:
             if pid not in self._keys:
                 continue
@@ -99,10 +127,35 @@ class LLMClients:
             text = self._call_one(pid, prompt, system_prompt, timeout)
             if text is not None:
                 logger.info(f"[LLM] ✓ {pid} 成功，回應長度 {len(text)} 字")
-                return (text.strip(), pid)
+                used_provider = pid
+                response_text = text.strip()
+                break
             logger.warning(f"[LLM] ✗ {pid} 失敗或無回應，嘗試下一個 provider")
-        logger.error(f"[LLM] 所有 providers 失敗，已嘗試：{order}")
-        return ("", None)
+
+        if response_text is None:
+            logger.error(f"[LLM] 所有 providers 失敗，已嘗試：{order}")
+            response_text = ""
+
+        # 記錄 LLM 呼叫（如果有 master logger）
+        if response_text and step_index is not None and step_name and agent_role:
+            try:
+                flow_logger = get_master_flow_logger()
+                if flow_logger:
+                    flow_logger.log_llm_call(
+                        step_index=step_index,
+                        step_name=step_name,
+                        agent_role=agent_role,
+                        ticker=ticker,
+                        system_prompt=system_prompt,
+                        user_prompt=prompt,
+                        raw_response=response_text,
+                        provider=used_provider,
+                        model=self._models.get(used_provider) if used_provider else None,
+                    )
+            except Exception as e:
+                logger.warning(f"[LLM] 記錄 LLM 呼叫失敗: {e}")
+
+        return (response_text, used_provider)
 
     def _call_one(
         self,

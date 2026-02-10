@@ -136,12 +136,27 @@ class ReishiV5:
     def run_daily(self):
         """
         每日运行。Log 依流程圖結構輸出：輸入層 → 第一層防護 → 五大 AI 分析層 → 第二層防護 → 輸出驗證與審計 → 報告。
+
+        同時啟用完整的 Full Run Log 系統：
+        - 逐步詳細記錄
+        - LLM 完整思考過程記錄
+        - 合成的 master log
         """
         from reporting.flow_logger import FlowLogger
+        from reporting.master_flow_logger import init_master_flow_logger
+        from core.llm_clients import set_master_flow_logger
+
         print("\n" + "=" * 70)
         print("🔮 REISHI 霊視 v5.4 - 每日分析")
         print("=" * 70)
         flow_logger = FlowLogger(flush_each=True)
+
+        # 初始化完整執行日誌系統
+        timestamp_str = datetime.now().strftime('%Y-%m-%d_%H%M%S')
+        full_run_report_dir = f"reports/daily/{timestamp_str}"
+        master_flow_logger = init_master_flow_logger(full_run_report_dir)
+        set_master_flow_logger(master_flow_logger)  # 讓 llm_clients 能夠記錄呼叫
+        print(f"📝 完整運行日誌目錄: {full_run_report_dir}\n")
         try:
             print("取得掃描名單…", flush=True)
             tickers_to_fetch = self._get_scan_tickers()
@@ -178,35 +193,102 @@ class ReishiV5:
             except Exception:
                 memory_desc = "已載入"
             flow_logger.log_input_layer(your_state, market_data_desc, news_desc, memory_desc, as_of_date="", mode="每日分析")
+
             # 1. 获取并验证数据 — 第一層防護：數據驗證（先標明步驟與數據源，再拉取）
             print("\n[1/9] 数据获取与验证...")
             print("[REISHI] [步驟1] 判斷基準：Yahoo/多數據源 K 線；僅美股/港股交易所；數據源依 config。")
             flow_logger.log_layer1_start("Yahoo (DataFetcher) / yfinance（依環境）")
+
+            # 記錄步驟開始
+            import time
+            step1_start = time.time()
+            master_flow_logger.log_step_start(
+                step_index=1,
+                step_name="數據獲取與驗證",
+                step_desc="從 Yahoo Finance / 多數據源取得 K 線數據，驗證數據有效性",
+                input_data={"tickers_count": len(tickers_to_fetch), "tickers_sample": tickers_to_fetch[:10]}
+            )
+
             market_data, data_source = self._fetch_and_validate_data(on_ticker=lambda t, i, n: flow_logger.log_layer1_fetch(t, i, n))
             tickers = list(market_data.keys()) or tickers_to_fetch
             flow_logger.log_layer1_result(len(market_data), tickers, data_source=data_source)
             print(f"[REISHI] 擇要：有效 ticker 數={len(market_data)}，來源={data_source}，前5檔={tickers[:5]}")
             if not market_data:
                 print("   ⚠ 無市場數據，分析將僅有架構輸出")
+
+            # 記錄步驟結束
+            step1_duration = time.time() - step1_start
+            master_flow_logger.log_step_end(
+                step_index=1,
+                step_name="數據獲取與驗證",
+                output_data={
+                    "valid_tickers_count": len(market_data),
+                    "data_source": data_source,
+                    "summary": f"成功獲取 {len(market_data)} 檔有效數據"
+                },
+                duration_sec=step1_duration
+            )
             # 基本面分析（數據源：DataFetcher / yfinance 財報與估值）
             print("\n[2/9] 基本面分析...")
             print("[REISHI] [步驟2] 判斷基準：get_yahoo_info / get_yahoo_financials_as_of；PE/PB/ROE/營收與盈利成長/利潤率。")
+
+            step2_start = time.time()
+            master_flow_logger.log_step_start(
+                step_index=2,
+                step_name="基本面分析",
+                step_desc="分析 PE/PB/ROE/營收成長/盈利率等財務指標",
+                input_data={"tickers_count": len(tickers), "data_source": "Yahoo Finance"}
+            )
+
             fundamental_by_ticker = self.fundamental_analyzer.analyze_batch(
                 tickers, on_ticker=lambda t, i, n: flow_logger.log_layer1_fetch(t, i, n) if flow_logger else None
             )
             _n_f = len(fundamental_by_ticker)
             _preview_f = [f"{t}: {getattr(fundamental_by_ticker[t], 'summary_text', '')[:40]}…" for t in list(fundamental_by_ticker.keys())[:3]]
             print(f"[REISHI] 擇要：成功基本面數={_n_f}，前3檔擇要={_preview_f}")
+
+            step2_duration = time.time() - step2_start
+            master_flow_logger.log_step_end(
+                step_index=2,
+                step_name="基本面分析",
+                output_data={
+                    "analyzed_tickers": _n_f,
+                    "summary": f"完成 {_n_f} 檔基本面分析"
+                },
+                duration_sec=step2_duration
+            )
             # 五大 AI 方向分析層
             flow_logger.log_ai_layer_start()
+
             # 3. 图表型态识别（數據源：第一層驗證後的 K 線）
             print("\n[3/9] 图表型态识别...")
             print("[REISHI] [步驟3] 判斷基準：收盤≥20日高 0.98 視為突破；成交量/均線未檢核。")
             flow_logger.log_ai_2_start(len(tickers), data_sources="第一層驗證後的 K 線（步驟 1 的 Yahoo/DataFetcher）")
+
+            step3_start = time.time()
+            master_flow_logger.log_step_start(
+                step_index=3,
+                step_name="圖表型態識別",
+                step_desc="掃描 K 線圖表，識別突破、VCP 等技術型態",
+                input_data={"tickers_count": len(tickers)}
+            )
+
             pattern_analysis = self.pattern_recognition.scan_all(tickers, market_data, on_ticker=lambda t, i, n: flow_logger.log_ai_2_fetch(t, i, n))
             flow_logger.log_ai_2_result(len(pattern_analysis), [getattr(c, "ticker", "") for c in pattern_analysis] if pattern_analysis else None)
             _pt = [getattr(c, "ticker", "?") for c in (pattern_analysis or [])[:5]]
             print(f"[REISHI] 擇要：圖表候選數={len(pattern_analysis or [])}，前5檔={_pt}")
+
+            step3_duration = time.time() - step3_start
+            master_flow_logger.log_step_end(
+                step_index=3,
+                step_name="圖表型態識別",
+                output_data={
+                    "pattern_candidates": len(pattern_analysis or []),
+                    "sample_tickers": _pt,
+                    "summary": f"發現 {len(pattern_analysis or [])} 個圖表型態候選"
+                },
+                duration_sec=step3_duration
+            )
             # 4. 因果推理（數據源：即時新聞 Finnhub、持倉本地）
             print("\n[4/9] 因果推理...")
             print("[REISHI] [步驟4] 判斷基準：Finnhub 新聞 + 持倉；LLM 因果鏈（四角）。")
@@ -226,6 +308,19 @@ class ReishiV5:
             print("\n[6/9] Multi-Agent 协作分析...")
             print("[REISHI] [步驟6] 判斷基準：三角色(Fundamental/Sentiment/Valuation)→單輪共識；輸出 consensus_action/disagreements/final_recommendation。")
             flow_logger.log_ai_5_start(len(pattern_analysis), data_sources="圖表候選（步驟 3）、市場數據（步驟 1）；LLM 四角（Scitely/Cohere/Mistral/OpenRouter）")
+
+            step6_start = time.time()
+            master_flow_logger.log_step_start(
+                step_index=6,
+                step_name="Multi-Agent 協作分析",
+                step_desc="三個分析角色（基本面/情緒/估值）協作共識，LLM 生成最終建議",
+                input_data={
+                    "pattern_candidates": len(pattern_analysis or []),
+                    "market_data_tickers": len(market_data),
+                    "fundamental_data": len(fundamental_by_ticker)
+                }
+            )
+
             multi_agent_analysis = self.multi_agent.analyze_all(
                 candidates=pattern_analysis,
                 data={
@@ -239,6 +334,18 @@ class ReishiV5:
             _by_t = _ma.get("by_ticker") or {}
             _ma_preview = [f"{t}: {getattr(_by_t[t], 'consensus_action', '?')}" for t in list(_by_t.keys())[:5]]
             print(f"[REISHI] 擇要：Multi-Agent 候選數={len(_by_t)}，前5檔共識={_ma_preview}")
+
+            step6_duration = time.time() - step6_start
+            master_flow_logger.log_step_end(
+                step_index=6,
+                step_name="Multi-Agent 協作分析",
+                output_data={
+                    "consensus_candidates": len(_by_t),
+                    "sample_consensus": _ma_preview,
+                    "summary": f"Multi-Agent 分析完成，{len(_by_t)} 檔達成共識"
+                },
+                duration_sec=step6_duration
+            )
             # 7. 霊視记忆参考（數據源：霊視記憶 DB、圖表候選）
             print("\n[7/9] 霊視记忆参考...")
             print("[REISHI] [步驟7] 判斷基準：霊視記憶 DB + 圖表候選；LLM 摘要/洞察（四角）。")
@@ -251,6 +358,19 @@ class ReishiV5:
             print("\n[8/9] 决策引擎...")
             print("[REISHI] [步驟8] 判斷基準：三大原則(賺最多/賺最快/風險最少)+ AllAnalyses 摘要→防幻覺 LLM→解析 actions。")
             flow_logger.log_layer2_start(data_sources="防幻覺模組（Scitely/Cohere/Mistral/OpenRouter）、步驟 1～7 分析結果")
+
+            step8_start = time.time()
+            master_flow_logger.log_step_start(
+                step_index=8,
+                step_name="決策引擎",
+                step_desc="LLM 綜合所有分析層的結果，套用三大投資原則（賺最多/賺最快/風險最少），生成最終交易決策",
+                input_data={
+                    "pattern_candidates": len(pattern_analysis or []),
+                    "multi_agent_candidates": len(_by_t),
+                    "portfolio_state": "持倉分析已完成"
+                }
+            )
+
             all_analyses = AllAnalyses(
                 pattern=pattern_analysis,
                 causal=causal_analysis,
@@ -268,6 +388,18 @@ class ReishiV5:
             summary = ", ".join([f"{getattr(a, 'action', '')} {getattr(a, 'ticker', '')}" for a in acts[:3]]) if acts else "無操作"
             flow_logger.log_layer2_result(len(acts), summary)
             print(f"[REISHI] 擇要：決策解析 actions 數={len(acts)}，前3筆={summary}")
+
+            step8_duration = time.time() - step8_start
+            master_flow_logger.log_step_end(
+                step_index=8,
+                step_name="決策引擎",
+                output_data={
+                    "final_actions": len(acts),
+                    "action_sample": summary,
+                    "summary": f"生成 {len(acts)} 個交易決策"
+                },
+                duration_sec=step8_duration
+            )
             # 9. 验证 + 审计
             print("\n[9/9] 最终验证与审计...")
             print("[REISHI] [步驟9] 判斷基準：output_validator 邏輯/數字檢查；final_auditor 審計（只檢查不判斷）。")
@@ -279,16 +411,28 @@ class ReishiV5:
             # 生成报告
             print("\n生成报告...")
             report = self.report_generator.generate(decision, all_analyses, audit)
-            report_dir = f"reports/daily"
-            os.makedirs(report_dir, exist_ok=True)
-            report_path = f"{report_dir}/{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.md"
-            report.save(report_path)
-            flow_logger.log_report_start(report_path)
+
+            # 保存摘要報告到完整日誌目錄
+            summary_report_path = f"{full_run_report_dir}/SUMMARY_REPORT.md"
+            os.makedirs(full_run_report_dir, exist_ok=True)
+            with open(summary_report_path, "w", encoding="utf-8") as f:
+                f.write(report.to_text())
+
+            flow_logger.log_report_start(summary_report_path)
             flow_logger.log_flow_end()
+
+            # 完成完整運行日誌記錄
+            master_flow_logger.finalize()
+            summary = master_flow_logger.get_summary()
+            print(f"\n✅ 完整運行日誌已生成:")
+            print(f"   - Master Log: {summary['master_log']}")
+            print(f"   - LLM Calls: {summary['llm_log']}")
+            print(f"   - Data Flow: {summary['data_flow_log']}")
+
             self.notifier.send_daily_report(report)
             print("\n" + "=" * 70)
             print("✅ 每日分析完成！")
-            print(f"📄 报告已保存: {report_path}")
+            print(f"📄 完整日誌目錄: {full_run_report_dir}")
             print("=" * 70)
             print("\n" + report.to_text())
             return report
@@ -296,6 +440,11 @@ class ReishiV5:
             print(f"\n❌ 错误: {e}")
             import traceback
             traceback.print_exc()
+            # 即使出錯也嘗試完成日誌
+            try:
+                master_flow_logger.finalize()
+            except:
+                pass
             return None
     
     # 與 docs/API_KEYS_IN_FLOW.md / Logic Flow 對應的步驟名稱
