@@ -53,14 +53,14 @@ CONFIG = {
         "name": "宏觀 (Reishi01)",
         "api_key_env": "OPENROUTER_API_KEY",
         "model_env": "OPENROUTER_MODEL",
-        "model_default": "meta-llama/llama-3.2-3b-instruct:free",
+        "model_default": "stepfun/step-3.5-flash:free",
         "url": "https://openrouter.ai/api/v1/chat/completions",
     },
     "openrouter2": {
         "name": "宏觀 (Reishi02)",
         "api_key_env": "OPENROUTER_API_KEY_2",
         "model_env": "OPENROUTER_MODEL_2",
-        "model_default": "meta-llama/llama-3.1-8b-instruct:free",
+        "model_default": "openrouter/pony-alpha",
         "url": "https://openrouter.ai/api/v1/chat/completions",
     },
     "ollama": {
@@ -221,22 +221,45 @@ class LLMClients:
             pass
         return None
 
+    def _estimate_tokens(self, text: str) -> int:
+        """簡易 token 估算：中英混合約每字 0.4 token，保守估計"""
+        return int(len(text) * 0.6)
+
     def _call_openrouter(
         self, prompt: str, system_prompt: Optional[str], timeout: int,
         provider_id: str = "openrouter",
     ) -> Optional[str]:
-        """OpenRouter 呼叫（支援雙帳號：openrouter / openrouter2）"""
+        """OpenRouter 呼叫（支援雙帳號：openrouter / openrouter2）
+        混合策略：<30K tokens 用 Llama 3.1 8B（穩定），>=30K 用 Step 3.5 Flash（大 context）"""
         cfg = CONFIG[provider_id]
         url = cfg["url"]
         key = self._keys.get(provider_id)
         if not key:
             return None
-        model = self._models.get(provider_id, cfg["model_default"])
-        msgs = self._messages(prompt, system_prompt)
-        label = cfg["name"]
 
-        max_retries = 3
-        for attempt in range(max_retries):
+        # 估算 token 數，決定用哪個模型
+        total_text = prompt + (system_prompt or "")
+        est_tokens = self._estimate_tokens(total_text)
+
+        # 混合策略閾值：30K tokens
+        SMALL_CONTEXT_LIMIT = 30000
+        MODEL_SMALL = "meta-llama/llama-3.1-8b-instruct:free"  # 32K context，穩定少 429
+        MODEL_LARGE = "stepfun/step-3.5-flash:free"  # 256K context，大輸入時用
+
+        if est_tokens >= SMALL_CONTEXT_LIMIT:
+            model = MODEL_LARGE
+            context_note = f"大輸入({est_tokens} tokens)，用 Step 3.5 Flash"
+        else:
+            model = MODEL_SMALL
+            context_note = f"一般輸入({est_tokens} tokens)，用 Llama 3.1 8B"
+
+        msgs = self._messages(prompt, system_prompt)
+        label = f"{cfg['name']} [{context_note}]"
+
+        # 429 專用：較多重試 + 較長等待，讓速率限制有時間重置
+        max_retries_429 = 6
+        max_retries_other = 3
+        for attempt in range(max_retries_429):
             try:
                 r = requests.post(
                     url,
@@ -263,8 +286,11 @@ class LLMClients:
                         .get("content", "")
                     )
                 elif r.status_code == 429:
-                    wait_time = 2 ** attempt
-                    logger.warning(f"[{label}] 速率限制 (429)，等待 {wait_time}s 後重試... (嘗試 {attempt + 1}/{max_retries})")
+                    # 指數退避並封頂，給 OpenRouter 限流窗口時間重置
+                    wait_time = min(90, 5 * (2 ** attempt))
+                    logger.warning(
+                        f"[{label}] 速率限制 (429)，等待 {wait_time}s 後重試... (嘗試 {attempt + 1}/{max_retries_429})"
+                    )
                     time.sleep(wait_time)
                     continue
                 else:
@@ -272,12 +298,17 @@ class LLMClients:
                     return None
 
             except requests.exceptions.Timeout:
-                logger.warning(f"[{label}] 超時，嘗試 {attempt + 1}/{max_retries}")
-                if attempt < max_retries - 1:
-                    time.sleep(1)
+                logger.warning(f"[{label}] 超時，嘗試 {attempt + 1}/{max_retries_other}")
+                if attempt < max_retries_other - 1:
+                    time.sleep(2)
                     continue
+                return None
             except Exception as e:
                 logger.warning(f"[{label}] 異常: {e}")
+                if attempt < max_retries_other - 1:
+                    time.sleep(2)
+                    continue
+                return None
 
         return None
 
