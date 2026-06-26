@@ -7,6 +7,7 @@ REISHI 霊視 v5.0 - 决策引擎
 - 风险最少：保护本金
 """
 
+import time
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Any
 from datetime import datetime
@@ -268,7 +269,8 @@ class DecisionEngine:
         
         # #region agent log
         try:
-            import json, time
+            import json
+            import time
             with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
                 _dbg.write(json.dumps({"hypothesisId": "H8", "message": "analyses_summary_sent_to_llm", "data": {"summary_len": len(analyses_summary), "summary_preview": analyses_summary[:500], "full_summary": analyses_summary}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
         except Exception:
@@ -284,7 +286,8 @@ class DecisionEngine:
             )
             # #region agent log
             try:
-                import json, time
+                import json
+                import time
                 _full_content = response.final_analysis.content or ""
                 _content = _full_content[:500] if len(_full_content) > 500 else _full_content
                 with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
@@ -304,7 +307,8 @@ class DecisionEngine:
         # 3. 解析決策
         # #region agent log
         try:
-            import json, time
+            import json
+            import time
             _n_actions = len(decision_data.get("actions", []))
             with open("/Users/lautinyam/stock_scanner/.cursor/debug.log", "a", encoding="utf-8") as _dbg:
                 _dbg.write(json.dumps({"hypothesisId": "H5", "message": "decision_data_after_parse", "data": {"n_actions": _n_actions, "overall_assessment": (decision_data.get("overall_assessment") or "")[:100]}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")

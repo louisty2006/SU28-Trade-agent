@@ -1,0 +1,14 @@
+[lint]
+# E402: load_dotenv() before imports is intentional throughout this codebase
+# E722: bare except in error-handling/archive code is acceptable
+# F841: unused vars already auto-fixed; remaining are in archive/scripts
+ignore = ["E402", "E722", "F841"]
+
+# Exclude archive and one-off scripts from strict checks
+exclude = [
+    "archive/",
+    "scripts/",
+    "test_*.py",
+    "view_runs.py",
+    "demo_*.py",
+]
