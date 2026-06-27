@@ -165,7 +165,13 @@ def get_macro_data(
     except ValueError as e:
         return f"FRED: {e}"
 
-    meta = _request("series", {"series_id": series_id}).get("seriess") or []
+    try:
+        meta = _request("series", {"series_id": series_id}).get("seriess") or []
+    except ValueError as e:
+        return (
+            f"FRED: {e}. Use a known alias such as 'cpi', 'unemployment', "
+            f"'fed_funds_rate', '10y_treasury', or a valid series ID like 'CPIAUCSL'."
+        )
     if not meta:
         return (
             f"FRED series '{series_id}' not found. Pass a known alias "
@@ -177,15 +183,21 @@ def get_macro_data(
     frequency = info.get("frequency", "")
     seasonal = info.get("seasonal_adjustment_short", "")
 
-    observations = _request(
-        "series/observations",
-        {
-            "series_id": series_id,
-            "observation_start": start_date,
-            "observation_end": curr_date,
-            "sort_order": "asc",
-        },
-    ).get("observations", [])
+    try:
+        observations = _request(
+            "series/observations",
+            {
+                "series_id": series_id,
+                "observation_start": start_date,
+                "observation_end": curr_date,
+                "sort_order": "asc",
+            },
+        ).get("observations", [])
+    except ValueError as e:
+        return (
+            f"FRED: {e}. Series '{series_id}' may be invalid; try aliases like "
+            f"'cpi', 'unemployment', 'fed_funds_rate', '10y_treasury'."
+        )
 
     # FRED encodes a missing observation as ".".
     points = [

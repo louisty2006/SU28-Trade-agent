@@ -49,13 +49,15 @@ class TestRenderTraderProposal:
             action=TraderAction.BUY,
             reasoning="Strong technicals + fundamentals.",
             entry_price=189.5,
+            target_price=220.0,
             stop_loss=178.0,
             position_sizing="6% of portfolio",
         )
         md = render_trader_proposal(p)
         assert "**Action**: Buy" in md
-        assert "**Entry Price**: 189.5" in md
-        assert "**Stop Loss**: 178.0" in md
+        assert "**Entry Price (建議入場價)**: 189.5" in md
+        assert "**Target / Exit Price (建議離場價)**: 220.0" in md
+        assert "**Stop Loss (止蝕價)**: 178.0" in md
         assert "**Position Sizing**: 6% of portfolio" in md
         assert "FINAL TRANSACTION PROPOSAL: **BUY**" in md
 
@@ -186,7 +188,7 @@ class TestTraderAgent:
         result = trader(_make_trader_state())
         plan = result["trader_investment_plan"]
         assert "**Action**: Buy" in plan
-        assert "**Entry Price**: 189.5" in plan
+        assert "**Entry Price (建議入場價)**: 189.5" in plan
         assert "FINAL TRANSACTION PROPOSAL: **BUY**" in plan
         # The same rendered markdown is also added to messages for downstream agents.
         assert plan in result["messages"][0].content

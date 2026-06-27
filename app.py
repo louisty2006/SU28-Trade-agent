@@ -31,6 +31,7 @@ from pathlib import Path
 import streamlit as st
 
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.dataflows.stockstats_utils import is_yf_rate_limited
 from tradingagents.mode_profiles import merge_mode_into_config, mode_label
 
 _log = logging.getLogger("tradingagents.app")
@@ -104,6 +105,47 @@ def _console(msg: str) -> None:
     line = f"[{ts}] TradingAgents | {msg}"
     print(line, flush=True)
     _log.info(msg)
+
+
+def _batch_cooldown_seconds() -> int:
+    return int(DEFAULT_CONFIG.get("batch_analysis_cooldown_seconds", 30))
+
+
+def _post_screen_cooldown_seconds() -> int:
+    return int(DEFAULT_CONFIG.get("post_screen_cooldown_seconds", 60))
+
+
+def _load_latest_watchlist() -> dict | None:
+    """Load the newest screening watchlist.json from disk, if any."""
+    screening_dir = results_root() / "screening"
+    if not screening_dir.exists():
+        return None
+    candidates = sorted(
+        screening_dir.glob("*/watchlist.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if data.get("watchlist"):
+            data["_source_dir"] = str(path.parent)
+            return data
+    return None
+
+
+def _maybe_wait_after_screening() -> None:
+    """Let Yahoo Finance recover after a heavy screener run."""
+    finished = st.session_state.get("screen_finished_at")
+    if not finished:
+        return
+    elapsed = time.time() - finished
+    wait = _post_screen_cooldown_seconds() - elapsed
+    if wait > 0:
+        _console(f"選股剛完成，等待 Yahoo 冷卻 {wait:.0f}s 後開始深度分析…")
+        time.sleep(wait)
 
 
 def _pending_step_label(done: set[str]) -> str:
@@ -467,12 +509,17 @@ with tab_screen:
         set_config(scr_cfg)
         prog = st.progress(0.0)
         prog_txt = st.empty()
+        status_txt = st.empty()
 
         def _cb(done: int, total: int):
             prog.progress(min(done / total, 1.0) if total else 1.0)
             prog_txt.caption(f"已掃描 {done}/{total}…")
             if done == 1 or done == total or done % max(1, total // 10) == 0:
                 _console(f"選股進度 {done}/{total}")
+
+        def _status(msg: str):
+            status_txt.caption(msg)
+            _console(msg)
 
         with st.spinner(f"篩選 {UNIVERSE_CHOICES[universe]} 中…（抓 yfinance 基本面）"):
             _console(f"▶ 選股開始: universe={universe} top={top_n}")
@@ -482,21 +529,44 @@ with tab_screen:
                     top_n=int(top_n),
                     output_dir=out,
                     max_tickers=max_tickers,
-                    max_workers=10,
                     progress_cb=_cb,
+                    status_cb=_status,
                 )
                 st.session_state["screen_result"] = result
                 st.session_state["screen_out"] = str(out)
+                st.session_state["screen_finished_at"] = time.time()
+                failed = result.get("failed") or []
                 st.success(
                     f"完成！掃描 {result.get('total_scanned', '?')} 隻，"
                     f"通過篩選 {result['total_scored']} 隻，存至 {out}"
                 )
-                _console(f"✓ 選股完成: {result['total_scored']} 隻通過 → {out}")
+                if failed:
+                    st.warning(
+                        f"重試 {result.get('retry_rounds', 0)} 輪後仍有 "
+                        f"{len(failed)} 隻無法取得資料：{', '.join(failed[:30])}"
+                        + ("…" if len(failed) > 30 else "")
+                    )
+                _console(
+                    f"✓ 選股完成: {result['total_scored']} 隻通過"
+                    + (f", {len(failed)} 隻失敗" if failed else "")
+                    + f" → {out}"
+                )
             except Exception as exc:
                 st.error(f"選股失敗：{exc}")
 
-    if st.session_state.get("screen_result"):
-        watchlist = st.session_state["screen_result"].get("watchlist", [])
+    # Fall back to the most recent watchlist on disk so the deep-analysis
+    # section (and its button) does not vanish after an app restart or a
+    # screening run that returned zero rows in-session.
+    screen_result = st.session_state.get("screen_result")
+    if not screen_result:
+        screen_result = _load_latest_watchlist()
+        if screen_result:
+            st.session_state["screen_result"] = screen_result
+            st.session_state.setdefault("screen_out", screen_result.get("_source_dir", ""))
+            st.caption("（已載入最近一次選股結果）")
+
+    if screen_result:
+        watchlist = screen_result.get("watchlist", [])
         if watchlist:
             cols = ["ticker", "sector", "quality_score", "growth_score",
                     "value_score", "composite_score", "hook"]
@@ -510,6 +580,7 @@ with tab_screen:
             st.caption(
                 "選股只給量化分數；按此對選定股票跑與「單股分析」一樣的完整 "
                 "multi-agent 報告（每隻數分鐘，逐隻順序執行）。"
+                " **建議一次不超過 3–5 檔**；選股後會自動等待 Yahoo 冷卻。"
                 " **終端機**（執行 `streamlit run app.py` 的視窗）會每 30 秒印出進度。"
             )
             wl_tickers = [r["ticker"] for r in watchlist]
@@ -519,40 +590,116 @@ with tab_screen:
                 default=wl_tickers[: min(3, len(wl_tickers))],
                 help="預設選前 3 名；可自行增減。",
             )
+            force_all = st.checkbox(
+                "重跑全部（取消勾選時，再按只會重跑未成功的檔）",
+                value=False,
+            )
             if st.button("📑 產生完整分析報告", type="primary", disabled=not picks):
                 if not analysts:
                     st.warning("請在左側至少選一個分析師。")
                 else:
                     today = _dt.date.today().isoformat()
+                    # Prefer the horizon the watchlist was screened with so a
+                    # loaded-from-disk run stays consistent with its selection.
+                    run_horizon = screen_result.get("horizon", scr_horizon)
                     overall = st.progress(0.0)
-                    summary_rows = []
-                    _console(f"▶ 批次深度分析開始: {len(picks)} 檔 — {', '.join(picks)}")
-                    for i, tk in enumerate(picks):
-                        st.markdown(f"**{tk}** ({i + 1}/{len(picks)})")
-                        per_status = st.empty()
-                        per_prog = st.progress(0.0)
-                        try:
-                            fs, sp = run_analysis_streaming(
-                                tk, today, "long_term", scr_horizon,
-                                analysts, per_status, per_prog,
-                                batch_pos=(i + 1, len(picks)),
-                            )
-                            decision = _section_value(fs, "final_trade_decision") or ""
-                            summary_rows.append({"ticker": tk, "report": str(sp),
-                                                 "decision_excerpt": decision[:160]})
-                            st.success(f"{tk} 完成 → {sp}")
-                        except Exception as exc:
-                            st.error(f"{tk} 分析失敗：{exc}")
-                            _console(f"✗ 批次分析失敗 {tk}: {exc}")
-                            summary_rows.append({"ticker": tk, "report": "FAILED",
-                                                 "decision_excerpt": str(exc)[:160]})
-                        overall.progress((i + 1) / len(picks))
-                        if i + 1 < len(picks):
-                            _console(f"冷卻 5s 後開始下一檔…")
-                            time.sleep(5)  # Poe proxy rate-limits back-to-back full runs
+                    _maybe_wait_after_screening()
+                    cooldown = _batch_cooldown_seconds()
+
+                    # results keyed by ticker so a retry pass overwrites cleanly.
+                    results: dict[str, dict] = {}
+
+                    # Carry over prior successes so a re-press only reruns the
+                    # not-yet-successful tickers (unless "重跑全部" is checked).
+                    prior = {
+                        r["ticker"]: r
+                        for r in st.session_state.get("batch_summary", [])
+                        if r.get("report") not in (None, "", "FAILED")
+                    }
+                    if force_all:
+                        to_run = list(picks)
+                    else:
+                        for tk in picks:
+                            if tk in prior:
+                                results[tk] = prior[tk]
+                        to_run = [tk for tk in picks if tk not in prior]
+                    if not to_run:
+                        st.info("選定的股票本次都已成功分析過；如需重跑請勾選「重跑全部」。")
+                        st.stop()
+
+                    def _run_pass(tickers: list[str], pass_label: str,
+                                  done_offset: int, grand_total: int) -> list[str]:
+                        """Run one sequential pass; return the tickers that failed."""
+                        failed: list[str] = []
+                        for j, tk in enumerate(tickers):
+                            st.markdown(f"**{tk}** ({pass_label} {j + 1}/{len(tickers)})")
+                            per_status = st.empty()
+                            per_prog = st.progress(0.0)
+                            try:
+                                fs, sp = run_analysis_streaming(
+                                    tk, today, "long_term", run_horizon,
+                                    analysts, per_status, per_prog,
+                                    batch_pos=(j + 1, len(tickers)),
+                                )
+                                decision = _section_value(fs, "final_trade_decision") or ""
+                                results[tk] = {"ticker": tk, "report": str(sp),
+                                               "decision_excerpt": decision[:160]}
+                                st.success(f"{tk} 完成 → {sp}")
+                            except Exception as exc:
+                                failed.append(tk)
+                                results[tk] = {"ticker": tk, "report": "FAILED",
+                                               "decision_excerpt": str(exc)[:160]}
+                                st.error(f"{tk} 暫時失敗（稍後重試）：{exc}")
+                                _console(f"✗ {pass_label} 失敗 {tk}: {exc}")
+                            done_offset += 1
+                            overall.progress(min(done_offset / grand_total, 1.0))
+                            if j + 1 < len(tickers):
+                                _console(f"冷卻 {cooldown}s 後開始下一檔…")
+                                time.sleep(cooldown)
+                        return failed
+
+                    # Pass 1: run everything; record failures, don't block.
+                    grand_total = len(to_run)
+                    _console(f"▶ 批次深度分析開始（第一輪）: {len(to_run)} 檔 — {', '.join(to_run)}")
+                    failed = _run_pass(to_run, "第一輪", 0, grand_total)
+
+                    # Retry passes: come back to the ones that failed.
+                    max_retry_passes = 2
+                    pass_num = 1
+                    while failed and pass_num <= max_retry_passes:
+                        wait = 90
+                        _console(
+                            f"第一輪有 {len(failed)} 檔失敗：{', '.join(failed)}。"
+                            f"等待 {wait}s 後開始第 {pass_num + 1} 輪重試…"
+                        )
+                        st.info(
+                            f"等待 {wait}s 後重試失敗的 {len(failed)} 檔："
+                            f"{', '.join(failed)}"
+                        )
+                        time.sleep(wait)
+                        grand_total += len(failed)
+                        retry_list = failed
+                        failed = _run_pass(
+                            retry_list, f"第{pass_num + 1}輪重試",
+                            grand_total - len(retry_list), grand_total,
+                        )
+                        pass_num += 1
+
+                    overall.progress(1.0)
+                    summary_rows = [results[tk] for tk in picks]
                     st.session_state["batch_summary"] = summary_rows
-                    _console(f"✓ 批次全部完成 ({len(picks)} 檔)")
-                    st.success("全部完成！報告已存,可到「📁 報告中心」逐份查看。")
+                    ok = sum(1 for r in summary_rows if r["report"] != "FAILED")
+                    _console(
+                        f"✓ 批次完成：成功 {ok}/{len(picks)}"
+                        + (f"，仍失敗 {', '.join(failed)}" if failed else "")
+                    )
+                    if failed:
+                        st.warning(
+                            f"完成 {ok}/{len(picks)} 檔。仍失敗：{', '.join(failed)}。"
+                            "可稍後再按一次本鍵，只會重跑失敗的檔。"
+                        )
+                    else:
+                        st.success("全部完成！報告已存,可到「📁 報告中心」逐份查看。")
 
             if st.session_state.get("batch_summary"):
                 st.markdown("**本次批量分析結果**")

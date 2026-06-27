@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 import time
 from typing import Annotated
 
@@ -19,21 +20,94 @@ logger = logging.getLogger(__name__)
 # enough to catch the year-old frames yfinance occasionally returns (#1021).
 MAX_OHLCV_STALE_DAYS = 10
 
+_yf_lock = threading.Lock()
+_yf_last_call = 0.0
 
-def yf_retry(func, max_retries=3, base_delay=2.0):
+
+def _yf_min_interval() -> float:
+    cfg = get_config()
+    return float(cfg.get("yf_min_interval_seconds", 0.35))
+
+
+def _yf_max_retries() -> int:
+    cfg = get_config()
+    return int(cfg.get("yf_max_retries", 5))
+
+
+def _yf_retry_base_delay() -> float:
+    cfg = get_config()
+    return float(cfg.get("yf_retry_base_delay", 3.0))
+
+
+def is_yf_rate_limited(exc: BaseException) -> bool:
+    """True when an exception looks like Yahoo Finance throttling or auth flake."""
+    if isinstance(exc, YFRateLimitError):
+        return True
+    msg = str(exc).lower()
+    return any(
+        token in msg
+        for token in (
+            "rate limit",
+            "too many requests",
+            "429",
+            "invalid crumb",
+            "unauthorized",
+        )
+    )
+
+
+def yf_throttle() -> None:
+    """Serialize yfinance calls with a minimum gap to reduce 429 bursts."""
+    global _yf_last_call
+    interval = _yf_min_interval()
+    if interval <= 0:
+        return
+    with _yf_lock:
+        now = time.monotonic()
+        wait = interval - (now - _yf_last_call)
+        if wait > 0:
+            time.sleep(wait)
+        _yf_last_call = time.monotonic()
+
+
+def yf_retry(func, max_retries=None, base_delay=None):
     """Execute a yfinance call with exponential backoff on rate limits.
 
     yfinance raises YFRateLimitError on HTTP 429 responses but does not
     retry them internally. This wrapper adds retry logic specifically
     for rate limits. Other exceptions propagate immediately.
     """
+    if max_retries is None:
+        max_retries = _yf_max_retries()
+    if base_delay is None:
+        base_delay = _yf_retry_base_delay()
+
     for attempt in range(max_retries + 1):
         try:
+            yf_throttle()
             return func()
         except YFRateLimitError:
             if attempt < max_retries:
                 delay = base_delay * (2 ** attempt)
-                logger.warning(f"Yahoo Finance rate limited, retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})")
+                logger.warning(
+                    "Yahoo Finance rate limited, retrying in %.0fs (attempt %d/%d)",
+                    delay,
+                    attempt + 1,
+                    max_retries,
+                )
+                time.sleep(delay)
+            else:
+                raise
+        except Exception as exc:
+            if is_yf_rate_limited(exc) and attempt < max_retries:
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    "Yahoo Finance error (%s), retrying in %.0fs (attempt %d/%d)",
+                    exc,
+                    delay,
+                    attempt + 1,
+                    max_retries,
+                )
                 time.sleep(delay)
             else:
                 raise

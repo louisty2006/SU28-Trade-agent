@@ -5,6 +5,16 @@ from __future__ import annotations
 from typing import Any
 
 
+_HORIZON_WEIGHTS = {
+    # Near-term investment: growth/catalyst sensitivity matters more, but avoid
+    # very volatile balance sheets when the holding window is short.
+    "6m": {"quality": 0.30, "growth": 0.45, "value": 0.25},
+    "1y": {"quality": 0.35, "growth": 0.40, "value": 0.25},
+    "3y": {"quality": 0.40, "growth": 0.35, "value": 0.25},
+    "5y+": {"quality": 0.50, "growth": 0.25, "value": 0.25},
+}
+
+
 def _clip_score(value: float | None, low: float, high: float, invert: bool = False) -> float:
     if value is None:
         return 0.0
@@ -16,7 +26,7 @@ def _clip_score(value: float | None, low: float, high: float, invert: bool = Fal
     return round(t * 10, 2)
 
 
-def score_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+def score_metrics(metrics: dict[str, Any], horizon: str | None = None) -> dict[str, Any]:
     """Return quality/growth/value/composite scores (0–10) and a one-line hook."""
     roe = metrics.get("roe")
     margin = metrics.get("profit_margin")
@@ -43,11 +53,25 @@ def score_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         + _clip_score(fcf_yield, 0, 0.08)
     ) / 2
 
-    # Penalize extreme beta for long-term holders
-    if beta is not None and beta > 1.8:
-        quality *= 0.9
+    horizon = horizon or "3y"
+    weights = _HORIZON_WEIGHTS.get(horizon, _HORIZON_WEIGHTS["3y"])
 
-    composite = round(quality * 0.4 + growth * 0.35 + value * 0.25, 2)
+    # Penalize extreme beta more for shorter horizons where volatility can
+    # overwhelm a 6-12 month thesis before fundamentals have time to compound.
+    if beta is not None:
+        if horizon == "6m" and beta > 1.5:
+            quality *= 0.85
+        elif horizon == "1y" and beta > 1.7:
+            quality *= 0.9
+        elif beta > 1.8:
+            quality *= 0.9
+
+    composite = round(
+        quality * weights["quality"]
+        + growth * weights["growth"]
+        + value * weights["value"],
+        2,
+    )
 
     hook_parts = []
     if roe is not None and roe > 0.15:
@@ -65,6 +89,7 @@ def score_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "growth_score": round(growth, 2),
         "value_score": round(value, 2),
         "composite_score": composite,
+        "horizon": horizon,
         "hook": hook,
     }
 

@@ -52,8 +52,8 @@ OPENAI_COMPATIBLE_API_KEY=sk-poe-xxxxxxxx      # https://poe.com/api/keys
 
 TRADINGAGENTS_LLM_PROVIDER=openai_compatible
 TRADINGAGENTS_LLM_BACKEND_URL=https://api.poe.com/v1
-TRADINGAGENTS_QUICK_THINK_LLM=gpt-4o-mini      # high-volume worker
-TRADINGAGENTS_DEEP_THINK_LLM=claude-haiku-4.5  # 2 calls/run (managers)
+TRADINGAGENTS_QUICK_THINK_LLM=gpt-5-nano       # high-volume worker (~$0.05/$0.40 per 1M)
+TRADINGAGENTS_DEEP_THINK_LLM=gpt-5-mini        # 2 calls/run (managers, ~87% finance reasoning)
 
 TRADINGAGENTS_MAX_DEBATE_ROUNDS=1
 TRADINGAGENTS_MAX_RISK_ROUNDS=1
@@ -86,8 +86,9 @@ All prices are per 1M tokens. "Per ticker" assumes ~80k input + ~10k output acro
 
 | Setup | Quick | Deep | ~Cost/ticker | 429 risk | Notes |
 |-------|-------|------|-------------|----------|-------|
-| **Poe all-in-one** (default) | `gpt-4o-mini` | `claude-haiku-4.5` | **$0.05–0.15** | None | One key, tool-calling verified |
-| OpenRouter + Poe | `google/gemini-2.5-flash-lite` ($0.10/$0.40) | `claude-haiku-4.5` (Poe) | $0.03–0.08 | None | Cheapest stable; two providers |
+| **Poe all-in-one** (default) | `gpt-5-nano` | `gpt-5-mini` | **$0.02–0.08** | None | One key, OpenAI tool-calling, best value |
+| Previous MVP | `gpt-4o-mini` | `claude-haiku-4.5` | $0.05–0.15 | None | Still works; weaker finance reasoning on deep |
+| OpenRouter + Poe | `google/gemini-2.5-flash-lite` ($0.10/$0.40) | `gpt-5-mini` (Poe) | $0.03–0.08 | None | Cheapest stable; two providers |
 | Premium | `claude-sonnet` | `claude-opus` | $1–3+ | None | Best quality, expensive |
 
 ### Avoid
@@ -114,10 +115,10 @@ Per ticker, full run (4 analysts, 1 debate round each):
 | Total tokens | ~60k–120k (mostly input; later agents re-read earlier reports) |
 | Deep-model share | ~15k–30k tokens (2 calls) |
 | Time | ~3–5 min (verified LYFT: **192s**) |
-| Cost (Poe MVP) | **$0.05–0.15** |
+| Cost (Poe MVP) | **$0.02–0.08** |
 | Cost (OpenRouter flash-lite quick) | **$0.03–0.08** |
 
-Rough scaling: a 20-stock batch on the Poe MVP config ≈ **$1–3 total**.
+Rough scaling: a 20-stock batch on the Poe MVP config ≈ **$0.50–1.50 total**.
 
 > Costs grow with debate rounds and number of analysts. Each extra debate round adds several quick calls.
 

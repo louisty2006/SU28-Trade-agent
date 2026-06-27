@@ -41,6 +41,14 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_SENTIMENT_STAGE_B_MAX_STAGE_A_SECONDS": "sentiment_stage_b_max_stage_a_seconds",
     "TRADINGAGENTS_SENTIMENT_STRUCTURED_PROMPT_MAX_CHARS": "sentiment_structured_prompt_max_chars",
     "TRADINGAGENTS_SENTIMENT_FREETEXT_FIRST": "sentiment_freetext_first",
+    "TRADINGAGENTS_SCREENER_MAX_WORKERS":    "screener_max_workers",
+    "TRADINGAGENTS_SCREENER_MAX_RETRY_ROUNDS": "screener_max_retry_rounds",
+    "TRADINGAGENTS_SCREENER_RETRY_COOLDOWN_SECONDS": "screener_retry_cooldown_seconds",
+    "TRADINGAGENTS_BATCH_COOLDOWN_SECONDS":  "batch_analysis_cooldown_seconds",
+    "TRADINGAGENTS_POST_SCREEN_COOLDOWN_SECONDS": "post_screen_cooldown_seconds",
+    "TRADINGAGENTS_YF_MIN_INTERVAL":         "yf_min_interval_seconds",
+    "TRADINGAGENTS_YF_MAX_RETRIES":          "yf_max_retries",
+    "TRADINGAGENTS_YF_RETRY_BASE_DELAY":     "yf_retry_base_delay",
 }
 
 
@@ -163,6 +171,19 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Screener (long-term workflow)
     "screener_universe": "sp500",
     "screener_top_n": 20,
+    "screener_max_workers": 2,
+    # After the initial pass, retry rate-limited tickers this many times (with
+    # cooldown between rounds) before listing them as failed.
+    "screener_max_retry_rounds": 15,
+    "screener_retry_cooldown_seconds": 60,
+    # Pause between back-to-back full analyses in the Streamlit batch workflow.
+    "batch_analysis_cooldown_seconds": 30,
+    # After a large screener run, wait before deep analysis so Yahoo cooldown clears.
+    "post_screen_cooldown_seconds": 60,
+    # yfinance request pacing (shared across screening + analysts).
+    "yf_min_interval_seconds": 1.0,
+    "yf_max_retries": 5,
+    "yf_retry_base_delay": 3.0,
     # Search queries used by get_global_news for macro headlines. Extend or
     # replace to broaden geographic / sector coverage.
     "global_news_queries": [

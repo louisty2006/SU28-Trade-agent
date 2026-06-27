@@ -138,18 +138,33 @@ class TraderProposal(BaseModel):
     )
     entry_price: float | None = Field(
         default=None,
-        description="Optional entry price target in the instrument's quote currency.",
+        description=(
+            "Suggested entry price in the instrument's quote currency. Provide a "
+            "concrete number based on current price and the analysts' levels; only "
+            "leave null if the action is Hold/Sell and no entry applies."
+        ),
+    )
+    target_price: float | None = Field(
+        default=None,
+        description=(
+            "Suggested exit / take-profit target price in the instrument's quote "
+            "currency, reflecting the recommended holding period. Provide a concrete "
+            "number whenever the action is Buy."
+        ),
     )
     stop_loss: float | None = Field(
         default=None,
-        description="Optional stop-loss price in the instrument's quote currency.",
+        description=(
+            "Suggested stop-loss / downside exit price in the instrument's quote "
+            "currency. Provide a concrete number whenever the action is Buy."
+        ),
     )
     position_sizing: str | None = Field(
         default=None,
         description="Optional sizing guidance, e.g. '5% of portfolio'.",
     )
 
-    @field_validator("entry_price", "stop_loss", mode="before")
+    @field_validator("entry_price", "target_price", "stop_loss", mode="before")
     @classmethod
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
@@ -168,9 +183,11 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
         f"**Reasoning**: {proposal.reasoning}",
     ]
     if proposal.entry_price is not None:
-        parts.extend(["", f"**Entry Price**: {proposal.entry_price}"])
+        parts.extend(["", f"**Entry Price (建議入場價)**: {proposal.entry_price}"])
+    if proposal.target_price is not None:
+        parts.extend(["", f"**Target / Exit Price (建議離場價)**: {proposal.target_price}"])
     if proposal.stop_loss is not None:
-        parts.extend(["", f"**Stop Loss**: {proposal.stop_loss}"])
+        parts.extend(["", f"**Stop Loss (止蝕價)**: {proposal.stop_loss}"])
     if proposal.position_sizing:
         parts.extend(["", f"**Position Sizing**: {proposal.position_sizing}"])
     parts.extend([

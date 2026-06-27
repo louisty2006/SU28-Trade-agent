@@ -4,6 +4,8 @@ Multi-agent stock analysis with Streamlit UI, long/short-term modes, screening, 
 
 **Verified baseline (2026-06-26):** LYFT full analysis in ~192s, 7/7 steps, Poe `gpt-4o-mini` + `claude-haiku-4.5`.
 
+**Current default (2026-06-27):** Poe `gpt-5-nano` (quick) + `gpt-5-mini` (deep) — higher finance-reasoning scores at lower cost.
+
 ---
 
 ## 1. Requirements
@@ -43,8 +45,8 @@ OPENAI_COMPATIBLE_API_KEY=sk-poe-xxxxxxxx
 
 TRADINGAGENTS_LLM_PROVIDER=openai_compatible
 TRADINGAGENTS_LLM_BACKEND_URL=https://api.poe.com/v1
-TRADINGAGENTS_QUICK_THINK_LLM=gpt-4o-mini
-TRADINGAGENTS_DEEP_THINK_LLM=claude-haiku-4.5
+TRADINGAGENTS_QUICK_THINK_LLM=gpt-5-nano
+TRADINGAGENTS_DEEP_THINK_LLM=gpt-5-mini
 ```
 
 ### Recommended tuning
@@ -100,15 +102,15 @@ Open http://localhost:8501
 
 | Role | Model | Provider | Calls per ticker | Why |
 |------|-------|----------|------------------|-----|
-| **Quick** (analysts, debate, trader, risk) | `gpt-4o-mini` | Poe | ~15 | Cheap, stable tool-calling |
-| **Deep** (Research Manager, Portfolio Manager) | `claude-haiku-4.5` | Poe | 2 | Structured output, good quality/cost |
+| **Quick** (analysts, debate, trader, risk) | `gpt-5-nano` | Poe | ~15 | Cheapest OpenAI tier, stable tool-calling |
+| **Deep** (Research Manager, Portfolio Manager) | `gpt-5-mini` | Poe | 2 | ~87% finance reasoning (AIMultiple), structured output |
 
 Both use the same Poe endpoint and `OPENAI_COMPATIBLE_API_KEY`.
 
 ### Cost (rough)
 
-- **~$0.05–0.15 per full ticker** on Poe MVP config
-- Much cheaper than Sonnet/Opus (previous config burned ~half a month quota in 1–2 runs)
+- **~$0.02–0.08 per full ticker** on Poe MVP config (`gpt-5-nano` + `gpt-5-mini`)
+- Previous `gpt-4o-mini` + `claude-haiku-4.5` was ~$0.05–0.15; deep model ranked low on finance reasoning benchmarks
 
 ### Do NOT use (lessons from testing)
 
@@ -121,11 +123,11 @@ Both use the same Poe endpoint and `OPENAI_COMPATIBLE_API_KEY`.
 
 ### OpenRouter vs Poe (if you want to experiment)
 
-| | OpenRouter paid (e.g. `google/gemini-2.5-flash-lite`) | Poe (`gpt-4o-mini`) |
+| | OpenRouter paid (e.g. `google/gemini-2.5-flash-lite`) | Poe (`gpt-5-nano` / `gpt-5-mini`) |
 |--|--|--|
-| Price per ticker | ~$0.01–0.02 | ~$0.02–0.05 |
+| Price per ticker | ~$0.01–0.02 | ~$0.02–0.08 |
 | Rate limits | Paid: no 429 | Poe points pool |
-| Tool-calling | Native OpenAI path, stable | Verified on Poe for gpt-4o-mini |
+| Tool-calling | Native OpenAI path, stable | Verified on Poe for GPT-5 family |
 | Setup | `OPENROUTER_API_KEY` + `TRADINGAGENTS_LLM_PROVIDER=openrouter` | Single Poe key |
 
 Poe is ~7–15% cheaper than OpenRouter for the **same** model family, but the main win for MVP v1.0 is **one provider, zero 429, verified tool-calls**.
@@ -139,7 +141,7 @@ TRADINGAGENTS_LLM_PROVIDER=openrouter
 TRADINGAGENTS_QUICK_THINK_LLM=google/gemini-2.5-flash-lite
 TRADINGAGENTS_DEEP_THINK_PROVIDER=openai_compatible
 TRADINGAGENTS_DEEP_THINK_BACKEND_URL=https://api.poe.com/v1
-TRADINGAGENTS_DEEP_THINK_LLM=claude-haiku-4.5
+TRADINGAGENTS_DEEP_THINK_LLM=gpt-5-mini
 ```
 
 ---
@@ -180,7 +182,7 @@ Each run saves under `~/.tradingagents/logs/reports/{TICKER}_{timestamp}/`:
 | Symptom | Fix |
 |---------|-----|
 | `429 Provider returned error` | You are on OpenRouter **free** model — switch to Poe MVP config above |
-| Stuck on Market Analyst 0/7 | Tool-calling model failing; use `gpt-4o-mini` on Poe |
+| Stuck on Market Analyst 0/7 | Tool-calling model failing; use `gpt-5-nano` on Poe |
 | `FRED_API_KEY not set` | Optional warning; add key or ignore for non-macro runs |
 | `Event loop is closed` on Ctrl+C | Harmless Streamlit shutdown noise on Python 3.13 |
 | Progress bar frozen | Check **terminal** logs; LLM steps can take 30–60s each |

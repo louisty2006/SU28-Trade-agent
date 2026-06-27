@@ -6,16 +6,134 @@ CLI and ``TradingAgentsGraph.save_reports`` both call this, so a headless / API
 run produces the same on-disk report tree a CLI run does.
 """
 
+import re
 from datetime import datetime
 from pathlib import Path
 
 from tradingagents.dataflows.config import get_config
-from tradingagents.mode_profiles import is_long_term, mode_label
+from tradingagents.mode_profiles import (
+    horizon_holding_label,
+    is_long_term,
+    mode_label,
+)
 
 
 def _portfolio_decision_text(final_state: dict) -> str:
     risk = final_state.get("risk_debate_state") or {}
     return risk.get("judge_decision") or final_state.get("final_trade_decision") or ""
+
+
+def _extract_price(text: str, *labels: str) -> str | None:
+    """Pull the first numeric value following any of ``labels`` in ``text``."""
+    if not text:
+        return None
+    for label in labels:
+        m = re.search(
+            rf"{re.escape(label)}[^0-9\-]*(-?\d[\d,]*\.?\d*)",
+            text,
+            re.IGNORECASE,
+        )
+        if m:
+            return m.group(1).replace(",", "")
+    return None
+
+
+def investment_parameters(final_state: dict) -> str:
+    """Deterministic holding-period + entry/exit/stop block for long-term reports."""
+    holding = horizon_holding_label()
+    trader = final_state.get("trader_investment_plan") or ""
+    pm = _portfolio_decision_text(final_state)
+
+    entry = _extract_price(trader, "建議入場價", "Entry Price", "Entry")
+    exit_p = (
+        _extract_price(trader, "建議離場價", "Target / Exit Price", "Target Price", "Exit")
+        or _extract_price(pm, "Price Target", "目標價")
+    )
+    stop = _extract_price(trader, "止蝕價", "Stop Loss")
+
+    def _cell(v: str | None) -> str:
+        return v if v else "見下方交易計劃 / see Trading Plan"
+
+    return "\n".join([
+        "## 投資參數 / Investment Parameters",
+        "",
+        "| 項目 Item | 數值 Value |",
+        "|---|---|",
+        f"| 持有期 Holding Period | {holding} |",
+        f"| 建議入場價 Suggested Entry | {_cell(entry)} |",
+        f"| 建議離場價 Suggested Exit / Target | {_cell(exit_p)} |",
+        f"| 止蝕價 Stop Loss | {_cell(stop)} |",
+    ])
+
+
+def _format_market_cap(value) -> str:
+    try:
+        cap = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    if cap >= 1_000_000_000_000:
+        return f"${cap / 1_000_000_000_000:.2f}T"
+    if cap >= 1_000_000_000:
+        return f"${cap / 1_000_000_000:.1f}B"
+    if cap >= 1_000_000:
+        return f"${cap / 1_000_000:.1f}M"
+    return f"${cap:,.0f}"
+
+
+def _industry_position(market_cap, sector: str | None, industry: str | None) -> str:
+    try:
+        cap = float(market_cap)
+    except (TypeError, ValueError):
+        cap = 0
+    if cap >= 200_000_000_000:
+        size = "mega-cap"
+    elif cap >= 10_000_000_000:
+        size = "large-cap"
+    elif cap >= 2_000_000_000:
+        size = "mid-cap"
+    elif cap > 0:
+        size = "small-cap"
+    else:
+        size = "company"
+    context = " / ".join(part for part in (sector, industry) if part)
+    return f"{size} participant in {context}" if context else size
+
+
+def company_overview(ticker: str) -> str:
+    """Return a deterministic company overview, or an empty string if unavailable."""
+    try:
+        from tradingagents.dataflows.fundamental_analytics import fetch_ticker_info
+
+        info = fetch_ticker_info(ticker)
+    except Exception:
+        return ""
+
+    name = info.get("longName") or info.get("shortName") or ticker
+    sector = info.get("sector")
+    industry = info.get("industry")
+    market_cap = info.get("marketCap")
+    summary = (info.get("longBusinessSummary") or "").strip()
+
+    if not any((name, sector, industry, market_cap, summary)):
+        return ""
+
+    rows = [
+        "| Field | Detail |",
+        "|---|---|",
+        f"| Company | {name} ({ticker}) |",
+    ]
+    if sector:
+        rows.append(f"| Sector | {sector} |")
+    if industry:
+        rows.append(f"| Industry | {industry} |")
+    if market_cap:
+        rows.append(f"| Market Cap | {_format_market_cap(market_cap)} |")
+    rows.append(f"| Industry Position | {_industry_position(market_cap, sector, industry)} |")
+
+    parts = ["## Company & Industry Overview", "", *rows]
+    if summary:
+        parts.extend(["", "### Business Summary", "", summary])
+    return "\n".join(parts)
 
 
 def write_investment_memo(final_state: dict, ticker: str, save_path: Path) -> Path | None:
@@ -28,17 +146,23 @@ def write_investment_memo(final_state: dict, ticker: str, save_path: Path) -> Pa
 
     cfg = get_config()
     horizon = cfg.get("investment_horizon", "3y")
+    overview = company_overview(ticker)
     sections = [
         f"# Investment Memo: {ticker}",
         "",
         f"**Mode**: {mode_label(cfg)} | **Horizon**: {horizon}",
         f"**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
+    ]
+    if overview:
+        sections.extend([overview, ""])
+    sections.extend([investment_parameters(final_state), ""])
+    sections.extend([
         "## Executive Summary",
         "",
         decision,
         "",
-    ]
+    ])
 
     analyst_blocks = [
         ("Business Quality & Analyst Inputs", "fundamentals_report"),
@@ -113,6 +237,11 @@ def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
     save_path.mkdir(parents=True, exist_ok=True)
     sections = []
     mode_hdr = f"**Investment Mode**: {mode_label()}\n\n" if is_long_term() else ""
+    overview = company_overview(ticker) if is_long_term() else ""
+    if overview:
+        sections.append(overview)
+    if is_long_term():
+        sections.append(investment_parameters(final_state))
 
     # 1. Analysts
     analysts_dir = save_path / "1_analysts"

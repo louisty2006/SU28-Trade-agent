@@ -18,6 +18,64 @@ _HORIZON_REFLECTION_DAYS = {
     "5y+": 1260,
 }
 
+_HORIZON_HOLDING_LABEL = {
+    "6m": "6 個月 (6 months)",
+    "1y": "1 年 (1 year)",
+    "3y": "3 年 (3 years)",
+    "5y+": "5 年以上 (5 years+)",
+}
+
+_HORIZON_GUIDANCE = {
+    "6m": {
+        "label": "6-month investment horizon",
+        "focus": (
+            "Focus on a 6-month investment case: next 1-2 earnings reports, near-term "
+            "catalysts, estimate revisions, margin inflection, valuation re-rating risk, "
+            "liquidity, and downside if catalysts slip."
+        ),
+        "action": (
+            "Actions should define whether to buy now, wait for a catalyst/price level, "
+            "or avoid until the 6-month thesis is de-risked."
+        ),
+    },
+    "1y": {
+        "label": "12-month investment horizon",
+        "focus": (
+            "Focus on a 12-month investment case: execution milestones, industry cycle, "
+            "macro sensitivity, earnings growth, valuation normalization, and expected "
+            "drivers over the next four quarters."
+        ),
+        "action": (
+            "Actions should map accumulation and review triggers to 12-month milestones "
+            "rather than open-ended multi-year holding."
+        ),
+    },
+    "3y": {
+        "label": "3-year investment horizon",
+        "focus": (
+            "Focus on a 3-year investment case: business quality, moat, compounding "
+            "potential, multi-year revenue and earnings growth, capital allocation, and "
+            "valuation against durable growth."
+        ),
+        "action": (
+            "Actions should support phased accumulation and monitoring across a 3-year "
+            "holding period."
+        ),
+    },
+    "5y+": {
+        "label": "5-year-plus investment horizon",
+        "focus": (
+            "Focus on a 5-year-plus investment case: durable competitive advantage, "
+            "management quality, capital allocation, secular industry structure, balance "
+            "sheet resilience, and long-run thesis-breakers."
+        ),
+        "action": (
+            "Actions should emphasize long-term position sizing, rebalancing, and "
+            "invalidation triggers over tactical entry timing."
+        ),
+    },
+}
+
 _SHORT_TERM_PROFILE = {
     "global_news_lookback_days": 7,
     "macro_lookback_days": 365,
@@ -89,6 +147,29 @@ def mode_label(config: dict | None = None) -> str:
     return "Short-term"
 
 
+def horizon_holding_label(config: dict | None = None) -> str:
+    """Human-readable holding period for the active long-term horizon."""
+    if config is None:
+        from tradingagents.dataflows.config import get_config
+
+        config = get_config()
+    horizon = config.get("investment_horizon", "3y")
+    return _HORIZON_HOLDING_LABEL.get(horizon, horizon)
+
+
+def horizon_guidance(config: dict | None = None) -> str:
+    if config is None:
+        from tradingagents.dataflows.config import get_config
+
+        config = get_config()
+    horizon = config.get("investment_horizon", "3y")
+    guidance = _HORIZON_GUIDANCE.get(horizon, _HORIZON_GUIDANCE["3y"])
+    return (
+        f" Horizon target: {guidance['label']}. {guidance['focus']} "
+        f"{guidance['action']}"
+    )
+
+
 _ANALYST_PROMPTS: dict[str, dict[str, str]] = {
     "fundamentals": {
         "short_term": (
@@ -149,17 +230,27 @@ def get_analyst_system_prompt(analyst: str, config: dict | None = None) -> str:
         config = get_config()
     mode = config.get("investment_mode", "short_term")
     prompts = _ANALYST_PROMPTS.get(analyst, {})
-    return prompts.get(mode, prompts.get("short_term", ""))
+    prompt = prompts.get(mode, prompts.get("short_term", ""))
+    if mode == "long_term":
+        prompt += horizon_guidance(config)
+    return prompt
 
 
 def pm_mode_instructions(config: dict | None = None) -> str:
     if is_long_term(config):
-        horizon = (config or {}).get("investment_horizon", "3y")
+        if config is None:
+            from tradingagents.dataflows.config import get_config
+
+            config = get_config()
+        holding = horizon_holding_label(config)
+        guidance = horizon_guidance(config)
         return (
-            f"\n\n**Long-term mode**: You MUST set time_horizon to reflect a {horizon} hold. "
-            "Fill conviction, fair_value_low/fair_value_high when estimable, and "
-            "invalidation_triggers (what would break the thesis). Structure investment_thesis "
-            "around business quality, valuation, catalysts, and bear case."
+            f"\n\n**Long-term mode**: You MUST set time_horizon to the holding period {holding}. "
+            "Set price_target to a concrete suggested exit price and fill "
+            "fair_value_low/fair_value_high when estimable. The executive_summary MUST state "
+            "the holding period, a suggested entry price, and a suggested exit price. Also fill "
+            "conviction and invalidation_triggers (what would break the thesis). Structure "
+            f"investment_thesis around business quality, valuation, catalysts, and bear case.{guidance}"
         )
     return (
         "\n\n**Short-term mode**: Focus on actionable entry, sizing, and risk levels for "
@@ -169,17 +260,24 @@ def pm_mode_instructions(config: dict | None = None) -> str:
 
 def research_manager_mode_instructions(config: dict | None = None) -> str:
     if is_long_term(config):
+        guidance = horizon_guidance(config)
         return (
             "\n\n**Long-term mode**: strategic_actions should describe accumulation pace, "
-            "target portfolio weight, and rebalance triggers—not day-trading entries."
+            f"target portfolio weight, and rebalance triggers—not day-trading entries.{guidance}"
         )
     return ""
 
 
 def trader_mode_instructions(config: dict | None = None) -> str:
     if is_long_term(config):
+        guidance = horizon_guidance(config)
+        holding = horizon_holding_label(config)
         return (
-            " You are planning a multi-year accumulation strategy. entry_price and stop_loss are "
-            "optional; emphasize position_sizing and phased buying."
+            " You are planning an investment action plan, not day trading. "
+            f"State the intended holding period as {holding}. For any Buy, you MUST "
+            "provide concrete numbers for entry_price (建議入場價), target_price "
+            "(建議離場價 / take-profit, consistent with that holding period) and "
+            "stop_loss (止蝕價). Also give position_sizing and phased-buying guidance."
+            f"{guidance}"
         )
     return ""

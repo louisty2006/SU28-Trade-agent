@@ -7,7 +7,9 @@ from typing import Any
 
 import yfinance as yf
 
+from tradingagents.dataflows.stockstats_utils import yf_retry
 from tradingagents.dataflows.symbol_utils import normalize_symbol
+from yfinance.exceptions import YFRateLimitError
 
 
 def _safe_float(value: Any) -> float | None:
@@ -31,11 +33,31 @@ def _cagr(start: float | None, end: float | None, years: float) -> float | None:
         return None
 
 
+def _info_is_usable(info: dict[str, Any]) -> bool:
+    """True when yfinance returned enough fields to score (not an empty 401)."""
+    if not info:
+        return False
+    return bool(
+        info.get("marketCap")
+        or info.get("shortName")
+        or info.get("longName")
+    )
+
+
 def fetch_ticker_info(ticker: str) -> dict[str, Any]:
     """Return yfinance .info dict for a normalized ticker."""
     sym = normalize_symbol(ticker)
     t = yf.Ticker(sym)
-    return dict(t.info or {})
+
+    def _fetch() -> dict[str, Any]:
+        raw = dict(t.info or {})
+        if not _info_is_usable(raw):
+            raise YFRateLimitError(
+                f"empty .info for {sym} (likely invalid crumb / rate limited)"
+            )
+        return raw
+
+    return yf_retry(_fetch)
 
 
 def compute_trend_metrics(ticker: str, years: int = 5) -> dict[str, Any]:
